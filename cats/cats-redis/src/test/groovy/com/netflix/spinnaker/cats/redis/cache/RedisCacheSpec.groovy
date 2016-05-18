@@ -19,6 +19,7 @@ package com.netflix.spinnaker.cats.redis.cache
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spinnaker.cats.cache.Cache
 import com.netflix.spinnaker.cats.cache.DefaultCacheData
+import com.netflix.spinnaker.cats.cache.WriteableCache
 import com.netflix.spinnaker.cats.cache.WriteableCacheSpec
 import com.netflix.spinnaker.cats.redis.JedisPoolSource
 import com.netflix.spinnaker.cats.redis.test.LocalRedisCheck
@@ -29,10 +30,15 @@ import spock.lang.Unroll
 
 @IgnoreIf({ LocalRedisCheck.redisUnavailable() })
 class RedisCacheSpec extends WriteableCacheSpec {
+    static int MAX_MSET_SIZE = 2
+    static int MAX_MERGE_COUNT = 1
+
+    RedisCache.CacheMetrics cacheMetrics = Mock(RedisCache.CacheMetrics)
+    JedisPool pool
 
     @Override
     Cache getSubject() {
-        def pool = new JedisPool("localhost", 6379)
+        pool = new JedisPool("localhost", 6379)
         def source = new JedisPoolSource(pool)
         Jedis jedis
         try {
@@ -43,7 +49,7 @@ class RedisCacheSpec extends WriteableCacheSpec {
         }
 
         def mapper = new ObjectMapper();
-        return new RedisCache('test', source, mapper)
+        return new RedisCache('test', source, mapper, RedisCacheOptions.builder().maxMset(MAX_MSET_SIZE).maxMergeBatch(MAX_MERGE_COUNT).build(), cacheMetrics)
     }
 
     @Unroll
@@ -97,6 +103,83 @@ class RedisCacheSpec extends WriteableCacheSpec {
         -1  || _
         1   || _
 
+    }
+
+    def 'verify MSET chunking behavior (> MAX_MSET_SIZE)'() {
+        setup:
+        ((WriteableCache) cache).mergeAll('foo', [createData('bar'), createData('baz'), createData('bam')])
+
+        expect:
+        cache.getIdentifiers('foo').sort() == ['bam', 'bar', 'baz']
+    }
+
+    def 'should fail if maxMsetSize is not even'() {
+        when:
+        RedisCacheOptions.builder().maxMset(7).build()
+
+        then:
+        thrown(IllegalArgumentException)
+    }
+
+    def 'should ignore hashes if hashes disabled'() {
+      setup:
+      def data = createData('blerp', [a: 'b'])
+
+      when: //initial write
+      ((WriteableCache) cache).merge('foo', data)
+
+      then:
+      1 * cacheMetrics.merge('test', 'foo', 1, 1, 0, 0, 1, 2, 1, 1, 1, 0)
+
+      when: //second write, hash matches
+      ((WriteableCache) cache).merge('foo', data)
+
+      then:
+      1 * cacheMetrics.merge('test', 'foo', 1, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+
+      when: //third write, disable hashing
+      pool.resource.withCloseable { Jedis j -> j.set('test:foo:hashes.disabled', 'true')}
+      ((WriteableCache) cache).merge('foo', data)
+
+      then:
+      1 * cacheMetrics.merge('test', 'foo', 1, 1, 0, 0, 1, 2, 1, 1, 1, 0)
+    }
+
+    def 'should not write an item if it is unchanged'() {
+        setup:
+        def data = createData('blerp', [a: 'b'])
+
+        when:
+        ((WriteableCache) cache).merge('foo', data)
+
+        then:
+        1 * cacheMetrics.merge('test', 'foo', 1, 1, 0, 0, 1, 2, 1, 1, 1, 0)
+
+        when:
+        ((WriteableCache) cache).merge('foo', data)
+
+        then:
+        1 * cacheMetrics.merge('test', 'foo', 1, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+    }
+
+    def 'should merge #mergeCount items at a time'() {
+        setup:
+        def cache = new RedisCache('test', new JedisPoolSource(pool), new ObjectMapper(), RedisCacheOptions.builder().maxMergeBatch(mergeCount).hashing(false).build(), cacheMetrics)
+
+        when:
+        cache.mergeAll('foo', items)
+
+        then:
+
+        fullMerges * cacheMetrics.merge('test', 'foo', mergeCount, mergeCount, 0, 0, 0, 2, 1, 0, 1, 0)
+        finalMergeCount * cacheMetrics.merge('test', 'foo', finalMerge, finalMerge, 0, 0, 0, 2, 1, 0, 1, 0)
+
+        where:
+        mergeCount << [ 1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 100, 101, 131 ]
+        items = (0..100).collect { createData("blerp-$it") }
+        fullMerges = items.size() / mergeCount
+        finalMerge = items.size() % mergeCount
+        finalMergeCount = finalMerge > 0 ? 1 : 0
     }
 
     private static class Bean {

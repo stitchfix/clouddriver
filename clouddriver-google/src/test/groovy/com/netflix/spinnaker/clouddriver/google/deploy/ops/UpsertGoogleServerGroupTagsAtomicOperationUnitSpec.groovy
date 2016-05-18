@@ -30,6 +30,8 @@ import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.config.GoogleConfigurationProperties
 import com.netflix.spinnaker.clouddriver.google.deploy.GoogleOperationPoller
 import com.netflix.spinnaker.clouddriver.google.deploy.description.UpsertGoogleServerGroupTagsDescription
+import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
 import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
 import spock.lang.Specification
 import spock.lang.Subject
@@ -38,6 +40,7 @@ class UpsertGoogleServerGroupTagsAtomicOperationUnitSpec extends Specification {
   private static final ACCOUNT_NAME = "auto"
   private static final PROJECT_NAME = "my_project"
   private static final SERVER_GROUP_NAME = "spinnaker-test-v000"
+  private static final REGION = "us-central1"
   private static final ZONE = "us-central1-b"
   private static final TAGS = ["some-tag-1", "some-tag-2", "some-tag-3"]
   private static final ORIG_INSTANCE_TEMPLATE_NAME = "$SERVER_GROUP_NAME-123"
@@ -62,6 +65,8 @@ class UpsertGoogleServerGroupTagsAtomicOperationUnitSpec extends Specification {
 
   void "should set tags on new instance template and on instances"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def globalOperations = Mock(Compute.GlobalOperations)
       def zonalOperations = Mock(Compute.ZoneOperations)
@@ -95,30 +100,35 @@ class UpsertGoogleServerGroupTagsAtomicOperationUnitSpec extends Specification {
       def instancesSetTags1Mock = Mock(Compute.Instances.SetTags)
       def instancesSetTagsOperation1Real = new Operation(targetLink: INSTANCE_1_URL,
                                                          name: INSTANCES_SET_TAGS_1_OP_NAME,
+                                                         zone: ZONE,
                                                          status: DONE)
       def instancesGet2Mock = Mock(Compute.Instances.Get)
       def instance2Real = new Instance(tags: new Tags())
       def instancesSetTags2Mock = Mock(Compute.Instances.SetTags)
       def instancesSetTagsOperation2Real = new Operation(targetLink: INSTANCE_2_URL,
                                                          name: INSTANCES_SET_TAGS_2_OP_NAME,
+                                                         zone: ZONE,
                                                          status: DONE)
       def instancesSetTagsOperation1GetMock = Mock(Compute.ZoneOperations.Get)
       def instancesSetTagsOperation2GetMock = Mock(Compute.ZoneOperations.Get)
       def instanceTemplatesDeleteMock = Mock(Compute.InstanceTemplates.Delete)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new UpsertGoogleServerGroupTagsDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                   zone: ZONE,
+                                                                   region: REGION,
                                                                    tags: TAGS,
                                                                    accountName: ACCOUNT_NAME,
                                                                    credentials: credentials)
       @Subject def operation = new UpsertGoogleServerGroupTagsAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
 
     then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
+
       // Query the managed instance group and its instance template.
       1 * computeMock.instanceGroupManagers() >> instanceGroupManagersMock
       1 * instanceGroupManagersMock.get(PROJECT_NAME, ZONE, SERVER_GROUP_NAME) >> instanceGroupManagersGetMock
@@ -184,6 +194,8 @@ class UpsertGoogleServerGroupTagsAtomicOperationUnitSpec extends Specification {
 
   void "should set tags on new instance template even if managed instance group has no instances"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def globalOperations = Mock(Compute.GlobalOperations)
       def instanceTemplatesMock = Mock(Compute.InstanceTemplates)
@@ -210,18 +222,21 @@ class UpsertGoogleServerGroupTagsAtomicOperationUnitSpec extends Specification {
       def instanceTemplatesDeleteMock = Mock(Compute.InstanceTemplates.Delete)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new UpsertGoogleServerGroupTagsDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                   zone: ZONE,
+                                                                   region: REGION,
                                                                    tags: TAGS,
                                                                    accountName: ACCOUNT_NAME,
                                                                    credentials: credentials)
       @Subject def operation = new UpsertGoogleServerGroupTagsAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
 
     then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
+
       // Query the managed instance group and its instance template.
       1 * computeMock.instanceGroupManagers() >> instanceGroupManagersMock
       1 * instanceGroupManagersMock.get(PROJECT_NAME, ZONE, SERVER_GROUP_NAME) >> instanceGroupManagersGetMock

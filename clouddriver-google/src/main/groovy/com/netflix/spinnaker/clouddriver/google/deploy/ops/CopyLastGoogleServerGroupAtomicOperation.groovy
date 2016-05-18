@@ -17,7 +17,7 @@
 package com.netflix.spinnaker.clouddriver.google.deploy.ops
 
 import com.google.api.services.compute.model.AttachedDisk
-import com.google.api.services.compute.model.InstanceGroupManager
+import com.google.api.services.compute.model.AutoscalingPolicy
 import com.google.api.services.compute.model.InstanceProperties
 import com.netflix.frigga.Names
 import com.netflix.spinnaker.clouddriver.data.task.Task
@@ -29,6 +29,7 @@ import com.netflix.spinnaker.clouddriver.google.deploy.handlers.BasicGoogleDeplo
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDisk
 import com.netflix.spinnaker.clouddriver.google.model.GoogleSecurityGroup
 import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleSecurityGroupProvider
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
 import org.springframework.beans.factory.annotation.Autowired
@@ -46,6 +47,9 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
   BasicGoogleDeployHandler basicGoogleDeployHandler
 
   @Autowired
+  GoogleClusterProvider googleClusterProvider
+
+  @Autowired
   GoogleSecurityGroupProvider googleSecurityGroupProvider
 
   CopyLastGoogleServerGroupAtomicOperation(BasicGoogleDeployDescription description) {
@@ -54,7 +58,7 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
 
   /**
    * curl -X POST -H "Content-Type: application/json" -d '[ { "cloneServerGroup": { "source": { "region": "us-central1", "serverGroupName": "myapp-dev-v000" }, "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "cloneServerGroup": { "source": { "region": "us-central1", "serverGroupName": "myapp-dev-v000" }, "application": "myapp", "stack": "dev", "image": "ubuntu-1410-utopic-v20150625", "targetSize": 4, "instanceType": "g1-small", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "cloneServerGroup": { "source": { "region": "us-central1", "serverGroupName": "myapp-dev-v000" }, "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20160509a", "targetSize": 4, "instanceType": "g1-small", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
    */
   @Override
   DeploymentResult operate(List priorOutputs) {
@@ -83,10 +87,10 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
     task.updateStatus BASE_PHASE, "Initializing copy of server group $description.source.serverGroupName..."
 
     // Locate the ancestor server group.
-    InstanceGroupManager ancestorServerGroup = GCEUtil.queryManagedInstanceGroupInRegion(description.credentials.project,
-                                                                                         description.source.region,
-                                                                                         description.source.serverGroupName,
-                                                                                         description.credentials)
+    def ancestorServerGroup = GCEUtil.queryServerGroup(googleClusterProvider,
+                                                       description.accountName,
+                                                       description.source.region,
+                                                       description.source.serverGroupName)
 
     if (!ancestorServerGroup) {
       return newDescription
@@ -94,22 +98,23 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
 
     def ancestorNames = Names.parseName(ancestorServerGroup.name)
 
-    // Override any ancestor values that were specified directly on the copyLastGoogleServerGroupDescription call.
-    newDescription.zone = description.zone ?: Utils.getLocalName(ancestorServerGroup.getZone())
+    // Override any ancestor values that were specified directly on the cloneServerGroup call.
+    newDescription.region = description.region ?: Utils.getLocalName(ancestorServerGroup.region)
+    newDescription.zone = description.zone ?: Utils.getLocalName(ancestorServerGroup.zone)
     newDescription.loadBalancers =
         description.loadBalancers != null
         ? description.loadBalancers
-        : GCEUtil.deriveNetworkLoadBalancerNamesFromTargetPoolUrls(ancestorServerGroup.getTargetPools())
+        : (ancestorServerGroup.loadBalancers as List)
     newDescription.application = description.application ?: ancestorNames.app
     newDescription.stack = description.stack ?: ancestorNames.stack
     newDescription.freeFormDetails = description.freeFormDetails ?: ancestorNames.detail
-    newDescription.targetSize = description.targetSize ?: ancestorServerGroup.targetSize
+    newDescription.targetSize =
+        description.targetSize != null
+        ? description.targetSize
+        : ancestorServerGroup.capacity.desired
 
-    def project = description.credentials.project
-    def compute = description.credentials.compute
     def accountName = description.accountName
-    def ancestorInstanceTemplate =
-        GCEUtil.queryInstanceTemplate(project, GCEUtil.getLocalName(ancestorServerGroup.instanceTemplate), compute)
+    def ancestorInstanceTemplate = ancestorServerGroup.launchConfig.instanceTemplate
 
     if (ancestorInstanceTemplate) {
       // Override any ancestor values that were specified directly on the call.
@@ -120,7 +125,7 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
       List<AttachedDisk> attachedDisks = ancestorInstanceProperties?.disks
 
       if (attachedDisks) {
-        def bootDisk = attachedDisks.find { it.getBoot() }
+        def bootDisk = attachedDisks.find { it.boot }
 
         newDescription.image = description.image ?: GCEUtil.getLocalName(bootDisk.initializeParams.sourceImage)
         newDescription.disks = description.disks ?: attachedDisks.collect { attachedDisk ->
@@ -172,6 +177,11 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
       newDescription.network =
         GCEUtil.getLocalName(description.network ?: ancestorInstanceProperties.networkInterfaces?.getAt(0)?.network)
 
+      newDescription.subnet =
+          description.subnet != null
+          ? description.subnet
+          : GCEUtil.getLocalName(ancestorInstanceProperties.networkInterfaces?.getAt(0)?.subnetwork)
+
       Set<GoogleSecurityGroup> googleSecurityGroups = googleSecurityGroupProvider.getAllByAccount(false, accountName)
 
       // Find all firewall rules with target tags matching the tags of the ancestor instance template.
@@ -206,6 +216,12 @@ class CopyLastGoogleServerGroupAtomicOperation implements AtomicOperation<Deploy
         }
       }
     }
+
+    AutoscalingPolicy ancestorAutoscalingPolicy = ancestorServerGroup.autoscalingPolicy
+    BasicGoogleDeployDescription.AutoscalingPolicy ancestorAutoscalingPolicyDescription =
+      GCEUtil.buildAutoscalingPolicyDescriptionFromAutoscalingPolicy(ancestorAutoscalingPolicy)
+
+    newDescription.autoscalingPolicy = description.autoscalingPolicy ?: ancestorAutoscalingPolicyDescription
 
     return newDescription
   }

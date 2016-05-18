@@ -21,6 +21,7 @@ import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.deploy.DeploymentResult
 import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
+import com.netflix.spinnaker.clouddriver.google.config.GoogleConfigurationProperties
 import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
 import com.netflix.spinnaker.clouddriver.google.deploy.description.CreateGoogleInstanceDescription
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
@@ -33,6 +34,9 @@ class CreateGoogleInstanceAtomicOperation implements AtomicOperation<DeploymentR
   private static final String DEFAULT_NETWORK_NAME = "default"
   private static final String accessConfigName = "External NAT"
   private static final String accessConfigType = "ONE_TO_ONE_NAT"
+
+  @Autowired
+  private GoogleConfigurationProperties googleConfigurationProperties
 
   @Autowired
   private GoogleConfiguration.DeployDefaults googleDeployDefaults
@@ -51,7 +55,7 @@ class CreateGoogleInstanceAtomicOperation implements AtomicOperation<DeploymentR
   }
 
   /**
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "createGoogleInstanceDescription": { "instanceName": "myapp-dev-v000-abcd", "image": "ubuntu-1404-trusty-v20150909a", "instanceType": "f1-micro", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "createGoogleInstanceDescription": { "instanceName": "myapp-dev-v000-abcd", "image": "ubuntu-1404-trusty-v20160509a", "instanceType": "f1-micro", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/ops
    */
   @Override
   DeploymentResult operate(List priorOutputs) {
@@ -64,12 +68,22 @@ class CreateGoogleInstanceAtomicOperation implements AtomicOperation<DeploymentR
     def compute = description.credentials.compute
     def project = description.credentials.project
     def zone = description.zone
+    def region = GCEUtil.getRegionFromZone(project, zone, compute)
 
-    def machineType = GCEUtil.queryMachineType(project, zone, description.instanceType, compute, task, BASE_PHASE)
+    def machineType = GCEUtil.queryMachineType(project, description.instanceType, compute, task, BASE_PHASE)
 
-    def sourceImage = GCEUtil.querySourceImage(project, description, compute, task, BASE_PHASE, googleApplicationName)
+    def sourceImage = GCEUtil.querySourceImage(project,
+                                               description,
+                                               compute,
+                                               task,
+                                               BASE_PHASE,
+                                               googleApplicationName,
+                                               googleConfigurationProperties.baseImageProjects)
 
     def network = GCEUtil.queryNetwork(project, description.network ?: DEFAULT_NETWORK_NAME, compute, task, BASE_PHASE)
+
+    def subnet =
+      description.subnet ? GCEUtil.querySubnet(project, region, description.subnet, compute, task, BASE_PHASE) : null
 
     task.updateStatus BASE_PHASE, "Composing instance..."
 
@@ -81,7 +95,7 @@ class CreateGoogleInstanceAtomicOperation implements AtomicOperation<DeploymentR
                                                    description.instanceType,
                                                    googleDeployDefaults)
 
-    def networkInterface = GCEUtil.buildNetworkInterface(network, accessConfigName, accessConfigType)
+    def networkInterface = GCEUtil.buildNetworkInterface(network, subnet, accessConfigName, accessConfigType)
 
     def metadata = GCEUtil.buildMetadataFromMap(description.instanceMetadata)
 
@@ -92,7 +106,7 @@ class CreateGoogleInstanceAtomicOperation implements AtomicOperation<DeploymentR
     def scheduling = GCEUtil.buildScheduling(description)
 
     def instance = new Instance(name: description.instanceName,
-                                machineType: machineType.getSelfLink(),
+                                machineType: "zones/$zone/machineTypes/$machineType.name",
                                 disks: attachedDisks,
                                 networkInterfaces: [networkInterface],
                                 metadata: metadata,

@@ -76,6 +76,9 @@ class UpsertAmazonLoadBalancerAtomicOperation implements AtomicOperation<UpsertA
       def regionScopedProvider = regionScopedProviderFactory.forRegion(description.credentials, region)
       def loadBalancerName = description.name ?: "${description.clusterName}-frontend".toString()
 
+      //maintains bwc with the contains internal check.
+      boolean isInternal = description.isInternal != null ? description.isInternal : description.subnetType?.contains('internal')
+
       task.updateStatus BASE_PHASE, "Beginning deployment to $region in $availabilityZones for $loadBalancerName"
 
       def loadBalancing = amazonClientProvider.getAmazonElasticLoadBalancing(description.credentials, region, true)
@@ -84,23 +87,26 @@ class UpsertAmazonLoadBalancerAtomicOperation implements AtomicOperation<UpsertA
 
       task.updateStatus BASE_PHASE, "Setting up listeners for ${loadBalancerName} in ${region}..."
       def listeners = []
-      for (UpsertAmazonLoadBalancerDescription.Listener listener : description.listeners) {
-        def awsListener = new Listener()
-        awsListener.withLoadBalancerPort(listener.externalPort).withInstancePort(listener.internalPort)
+      // ignore the old listener :0 => :0, which AWS adds to ELBs created sometime before 2012-09-26
+      description.listeners
+        .findAll { it.internalPort != 0 && it.externalPort != 0 && it.externalProtocol }
+        .each { UpsertAmazonLoadBalancerDescription.Listener listener ->
+          def awsListener = new Listener()
+          awsListener.withLoadBalancerPort(listener.externalPort).withInstancePort(listener.internalPort)
 
-        awsListener.withProtocol(listener.externalProtocol.name())
-        if (listener.internalProtocol && (listener.externalProtocol != listener.internalProtocol)) {
-          awsListener.withInstanceProtocol(listener.internalProtocol.name())
-        } else {
-          awsListener.withInstanceProtocol(listener.externalProtocol.name())
+          awsListener.withProtocol(listener.externalProtocol.name())
+          if (listener.internalProtocol && (listener.externalProtocol != listener.internalProtocol)) {
+            awsListener.withInstanceProtocol(listener.internalProtocol.name())
+          } else {
+            awsListener.withInstanceProtocol(listener.externalProtocol.name())
+          }
+          if (listener.sslCertificateId) {
+            task.updateStatus BASE_PHASE, "Attaching listener with SSL Certificate: ${listener.sslCertificateId}"
+            awsListener.withSSLCertificateId(listener.sslCertificateId)
+          }
+          listeners << awsListener
+          task.updateStatus BASE_PHASE, "Appending listener ${awsListener.protocol}:${awsListener.loadBalancerPort} -> ${awsListener.instanceProtocol}:${awsListener.instancePort}"
         }
-        if (listener.sslCertificateId) {
-          task.updateStatus BASE_PHASE, "Attaching listener with SSL Certificate: ${listener.sslCertificateId}"
-          awsListener.withSSLCertificateId(listener.sslCertificateId)
-        }
-        listeners << awsListener
-        task.updateStatus BASE_PHASE, "Appending listener ${awsListener.protocol}:${awsListener.loadBalancerPort} -> ${awsListener.instanceProtocol}:${awsListener.instancePort}"
-      }
 
       try {
         loadBalancer = loadBalancing.describeLoadBalancers(new DescribeLoadBalancersRequest([loadBalancerName]))?.
@@ -120,7 +126,7 @@ class UpsertAmazonLoadBalancerAtomicOperation implements AtomicOperation<UpsertA
           subnetIds = regionScopedProvider.subnetAnalyzer.getSubnetIdsForZones(availabilityZones,
                   description.subnetType, SubnetTarget.ELB)
         }
-        dnsName = createLoadBalancer(loadBalancing, loadBalancerName, availabilityZones, subnetIds, listeners, securityGroups)
+        dnsName = createLoadBalancer(loadBalancing, loadBalancerName, isInternal, availabilityZones, subnetIds, listeners, securityGroups)
       } else {
         dnsName = loadBalancer.DNSName
         updateLoadBalancer(loadBalancing, loadBalancer, listeners, securityGroups)
@@ -160,7 +166,10 @@ class UpsertAmazonLoadBalancerAtomicOperation implements AtomicOperation<UpsertA
     def loadBalancerName = loadBalancer.loadBalancerName
 
     if (listeners) {
-      def existingListeners = loadBalancer.listenerDescriptions*.listener
+      def existingListeners = loadBalancer.listenerDescriptions*.listener.findAll {
+        // ignore the old listener :0 => :0, which AWS adds to ELBs created sometime before 2012-09-26
+        it.protocol && it.instancePort != 0 && it.loadBalancerPort != 0
+      }
       def listenersToRemove = existingListeners.findAll {
         // existed previously but were not supplied in upsert and should be deleted
         !listeners.contains(it)
@@ -202,7 +211,7 @@ class UpsertAmazonLoadBalancerAtomicOperation implements AtomicOperation<UpsertA
     }
   }
 
-  private String createLoadBalancer(AmazonElasticLoadBalancing loadBalancing, String loadBalancerName,
+  private String createLoadBalancer(AmazonElasticLoadBalancing loadBalancing, String loadBalancerName, boolean isInternal,
                                     Collection<String> availabilityZones, Collection<String> subnetIds,
                                     Collection<Listener> listeners, Collection<String> securityGroups) {
     def request = new CreateLoadBalancerRequest(loadBalancerName)
@@ -211,7 +220,7 @@ class UpsertAmazonLoadBalancerAtomicOperation implements AtomicOperation<UpsertA
     if (description.subnetType) {
       task.updateStatus BASE_PHASE, "Subnet type: ${description.subnetType} = [$subnetIds]"
       request.withSubnets(subnetIds)
-      if (description.subnetType.contains('internal')) {
+      if (isInternal) {
         request.scheme = 'internal'
       }
     } else {

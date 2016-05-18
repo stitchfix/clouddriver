@@ -15,20 +15,12 @@
  */
 package com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.deploy.templates
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.AzureLoadBalancerDescription
-import com.netflix.spinnaker.clouddriver.azure.security.AzureNamedAccountCredentials
-import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
-import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.ops.converters.UpsertAzureLoadBalancerAtomicOperationConverter
 import com.netflix.spinnaker.clouddriver.azure.templates.AzureLoadBalancerResourceTemplate
-import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.UpsertAzureLoadBalancerDescription
-import com.netflix.spinnaker.clouddriver.data.task.Task
-import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
-import spock.lang.Shared
 import spock.lang.Specification
 
 class AzureLoadBalancerResourceTemplateSpec extends Specification {
-  UpsertAzureLoadBalancerDescription description
+  AzureLoadBalancerDescription description
 
   void setup(){
     description = createDescription()
@@ -37,18 +29,14 @@ class AzureLoadBalancerResourceTemplateSpec extends Specification {
   def 'should generate correct LoadBalancer create template'(){
     String template = AzureLoadBalancerResourceTemplate.getTemplate(description)
 
-    expect: template == expectedFullTemplate
+    expect: template.replaceAll('"createdTime" : "\\d+"', '"createdTime" : "1234567890"') == expectedFullTemplate
   }
 
-  UpsertAzureLoadBalancerDescription createNoRulesDescription(){
-    new UpsertAzureLoadBalancerDescription()
-  }
-
-  UpsertAzureLoadBalancerDescription createDescription(){
-    UpsertAzureLoadBalancerDescription description = new UpsertAzureLoadBalancerDescription()
+  AzureLoadBalancerDescription createDescription(){
+    AzureLoadBalancerDescription description = new AzureLoadBalancerDescription()
     description.cloudProvider = 'azure'
-    description.appName = 'azureMASM'
-    description.loadBalancerName = 'azureMASM-st1-d11'
+    description.appName = 'azuremasm'
+    description.loadBalancerName = 'azuremasm-st1-d11'
     description.stack = 'st1'
     description.detail = 'd11'
     description.region = 'westus'
@@ -64,7 +52,9 @@ class AzureLoadBalancerResourceTemplateSpec extends Specification {
     probe.unhealthyThreshold = 2
 
     description.probes.add(probe)
-    description.securityGroups = null
+    description.securityGroup = "azuremasm-sg1"
+    description.vnet = "azuremasm-vnet-westus"
+    description.subnet = "azuremasm-subnet-westus"
     description.loadBalancingRules = new ArrayList<AzureLoadBalancerDescription.AzureLoadBalancingRule>()
 
     AzureLoadBalancerDescription.AzureLoadBalancingRule rule = new AzureLoadBalancerDescription.AzureLoadBalancingRule()
@@ -86,7 +76,7 @@ class AzureLoadBalancerResourceTemplateSpec extends Specification {
     natRule.port = 80
 
     description.inboundNATRules.add(natRule)
-    description.name = 'azureMASM-st1-d11'
+    description.name = 'azuremasm-st1-d11'
     description.user = '[anonymous]'
 
     return description
@@ -104,22 +94,26 @@ class AzureLoadBalancerResourceTemplateSpec extends Specification {
     }
   },
   "variables" : {
+    "apiVersion" : "2015-05-01-preview",
     "loadBalancerName" : "azuremasm-st1-d11",
     "virtualNetworkName" : "vnet-azuremasm-westus",
     "publicIPAddressName" : "pip-azuremasm-st1-d11",
     "publicIPAddressType" : "Dynamic",
     "loadBalancerFrontEnd" : "fe-azuremasm-st1-d11",
-    "dnsNameForLBIP" : "dns-azuremasm",
+    "loadBalancerBackEnd" : "be-azuremasm-st1-d11",
+    "dnsNameForLBIP" : "[concat('dns-', uniqueString(concat(resourceGroup().id, subscription().id, 'azuremasmst1d11')))]",
     "ipConfigName" : "ipc-azuremasm-st1-d11",
     "loadBalancerID" : "[resourceID('Microsoft.Network/loadBalancers',variables('loadBalancerName'))]",
     "publicIPAddressID" : "[resourceID('Microsoft.Network/publicIPAddresses',variables('publicIPAddressName'))]",
-    "frontEndIPConfig" : "[concat(variables('loadBalancerID'),'/frontendIPConfigurations/',variables('loadBalancerFrontEnd'))]"
+    "frontEndIPConfig" : "[concat(variables('loadBalancerID'),'/frontendIPConfigurations/',variables('loadBalancerFrontEnd'))]",
+    "backendPoolID" : "[concat(variables('loadBalancerID'),'/backendAddressPools/',variables('loadBalancerBackEnd'))]"
   },
   "resources" : [ {
-    "apiVersion" : "2015-05-01-preview",
+    "apiVersion" : "[variables('apiVersion')]",
     "name" : "[variables('publicIPAddressName')]",
     "type" : "Microsoft.Network/publicIPAddresses",
     "location" : "[parameters('location')]",
+    "tags" : null,
     "properties" : {
       "publicIPAllocationMethod" : "[variables('publicIPAddressType')]",
       "dnsSettings" : {
@@ -127,16 +121,20 @@ class AzureLoadBalancerResourceTemplateSpec extends Specification {
       }
     }
   }, {
-    "apiVersion" : "2015-05-01-preview",
+    "apiVersion" : "[variables('apiVersion')]",
     "name" : "[variables('loadBalancerName')]",
     "type" : "Microsoft.Network/loadBalancers",
     "location" : "[parameters('location')]",
-    "dependsOn" : [ "[concat('Microsoft.Network/publicIPAddresses/',variables('publicIPAddressName'))]" ],
     "tags" : {
-      "appName" : "azureMASM",
+      "appName" : "azuremasm",
       "stack" : "st1",
-      "detail" : "d11"
+      "detail" : "d11",
+      "createdTime" : "1234567890",
+      "securityGroup" : "azuremasm-sg1",
+      "vnet" : "azuremasm-vnet-westus",
+      "subnet" : "azuremasm-subnet-westus"
     },
+    "dependsOn" : [ "[concat('Microsoft.Network/publicIPAddresses/',variables('publicIPAddressName'))]" ],
     "properties" : {
       "frontEndIPConfigurations" : [ {
         "name" : "[variables('loadBalancerFrontEnd')]",
@@ -146,11 +144,17 @@ class AzureLoadBalancerResourceTemplateSpec extends Specification {
           }
         }
       } ],
+      "backendAddressPools" : [ {
+        "name" : "[variables('loadBalancerBackEnd')]"
+      } ],
       "loadBalancingRules" : [ {
         "name" : "lbrule1",
         "properties" : {
           "frontendIPConfiguration" : {
             "id" : "[variables('frontEndIPConfig')]"
+          },
+          "backendAddressPool" : {
+            "id" : "[variables('backendPoolID')]"
           },
           "protocol" : "tcp",
           "frontendPort" : 80,

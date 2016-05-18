@@ -22,10 +22,12 @@ import com.netflix.spinnaker.clouddriver.cf.config.CloudFoundryConfig
 import com.netflix.spinnaker.clouddriver.core.CloudDriverConfig
 import com.netflix.spinnaker.clouddriver.core.RetrofitConfig
 import com.netflix.spinnaker.clouddriver.deploy.config.DeployConfiguration
+import com.netflix.spinnaker.clouddriver.docker.registry.DockerRegistryConfiguration
+import com.netflix.spinnaker.clouddriver.eureka.EurekaProviderConfiguration
 import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
 import com.netflix.spinnaker.clouddriver.kubernetes.KubernetesConfiguration
 import com.netflix.spinnaker.clouddriver.security.config.SecurityConfig
-import com.netflix.spinnaker.clouddriver.titan.TitanConfiguration
+import com.netflix.spinnaker.clouddriver.titus.TitusConfiguration
 import org.springframework.boot.actuate.autoconfigure.ManagementSecurityAutoConfiguration
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration
 import org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration
@@ -48,21 +50,20 @@ import java.security.Security
   DeployConfiguration,
   RetrofitConfig,
   AwsConfiguration,
-  TitanConfiguration,
+  TitusConfiguration,
   GoogleConfiguration,
   KubernetesConfiguration,
+  DockerRegistryConfiguration,
   CloudFoundryConfig,
   AzureConfiguration,
-  SecurityConfig
+  SecurityConfig,
+  EurekaProviderConfiguration
 ])
 @ComponentScan([
   'com.netflix.spinnaker.config',
-  'com.netflix.spinnaker.kato.config',
-  'com.netflix.spinnaker.mort.config',
-  'com.netflix.spinnaker.oort.config'
 ])
 @EnableAutoConfiguration(exclude = [BatchAutoConfiguration, GroovyTemplateAutoConfiguration, SecurityAutoConfiguration,
-ManagementSecurityAutoConfiguration])
+  ManagementSecurityAutoConfiguration])
 @EnableScheduling
 class Main extends SpringBootServletInitializer {
 

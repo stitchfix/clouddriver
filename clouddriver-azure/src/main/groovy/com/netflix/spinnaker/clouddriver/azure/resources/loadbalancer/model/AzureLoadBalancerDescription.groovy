@@ -16,17 +16,23 @@
 
 package com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model
 
+import com.microsoft.azure.management.network.models.LoadBalancer
+import com.netflix.frigga.Names
+import com.netflix.spinnaker.clouddriver.azure.common.AzureUtilities
 import com.netflix.spinnaker.clouddriver.azure.resources.common.AzureResourceOpsDescription
 
 class AzureLoadBalancerDescription extends AzureResourceOpsDescription {
   String loadBalancerName
   String vnet
-  String securityGroups
+  String subnet
+  String securityGroup
   String dnsName
+  String cluster
+  String serverGroup
+  String appName
   List<AzureLoadBalancerProbe> probes = []
   List<AzureLoadBalancingRule> loadBalancingRules = []
   List<AzureLoadBalancerInboundNATRule> inboundNATRules = []
-  Map<String,String> tags = [:]
 
   static class AzureLoadBalancerProbe {
     enum AzureLoadBalancerProbesType {
@@ -69,66 +75,57 @@ class AzureLoadBalancerDescription extends AzureResourceOpsDescription {
     Integer port
   }
 
+  static AzureLoadBalancerDescription build(LoadBalancer azureLoadBalancer) {
+    AzureLoadBalancerDescription description = new AzureLoadBalancerDescription(loadBalancerName: azureLoadBalancer.name)
+    def parsedName = Names.parseName(azureLoadBalancer.name)
+    description.stack = azureLoadBalancer.tags?.stack ?: parsedName.stack
+    description.detail = azureLoadBalancer.tags?.detail ?: parsedName.detail
+    description.appName = azureLoadBalancer.tags?.appName ?: parsedName.app
+    description.cluster = azureLoadBalancer.tags?.cluster
+    description.serverGroup = azureLoadBalancer.tags?.serverGroup
+    description.vnet = azureLoadBalancer.tags?.vnet
+    description.createdTime = azureLoadBalancer.tags?.createdTime?.toLong()
+    description.tags = azureLoadBalancer.tags
+    description.region = azureLoadBalancer.location
+
+    for (def rule : azureLoadBalancer.loadBalancingRules) {
+      def r = new AzureLoadBalancingRule(ruleName: rule.name)
+      r.externalPort = rule.frontendPort
+      r.backendPort = rule.backendPort
+      r.probeName = AzureUtilities.getNameFromResourceId(rule?.probe?.id) ?: "not-assigned"
+      r.persistence = rule.loadDistribution;
+      r.idleTimeout = rule.idleTimeoutInMinutes;
+
+      if (rule.protocol.toLowerCase() == "udp") {
+        r.protocol = AzureLoadBalancingRule.AzureLoadBalancingRulesType.UDP
+      } else {
+        r.protocol = AzureLoadBalancingRule.AzureLoadBalancingRulesType.TCP
+      }
+      description.loadBalancingRules.add(r)
+    }
+
+    // Add the probes
+    for (def probe : azureLoadBalancer.probes) {
+      def p = new AzureLoadBalancerProbe()
+      p.probeName = probe.name
+      p.probeInterval = probe.intervalInSeconds
+      p.probePath = probe.requestPath
+      p.probePort = probe.port
+      p.unhealthyThreshold = probe.numberOfProbes
+      if (probe.protocol.toLowerCase() == "tcp") {
+        p.probeProtocol = AzureLoadBalancerProbe.AzureLoadBalancerProbesType.TCP
+      } else {
+        p.probeProtocol = AzureLoadBalancerProbe.AzureLoadBalancerProbesType.HTTP
+      }
+      description.probes.add(p)
+    }
+
+    for (def natRule : azureLoadBalancer.inboundNatRules) {
+      def n = new AzureLoadBalancerInboundNATRule(ruleName: natRule.name)
+      description.inboundNATRules.add(n)
+    }
+
+    description
+  }
+
 }
-
-/*
-  "exception" : {
-    "exceptionType" : "RetrofitError",
-    "operation" : "stageEnd",
-    "details" : {
-      "error" : "timeout",
-      "errors" : [ ],
-      "responseBody" : null,
-      "kind" : "NETWORK",
-      "status" : null,
-      "url" : null
-    },
-    "shouldRetry" : true
-  }
-},
-  Stage Context: {
-    "cloudProvider" : "azure",
-    "providerType" : "azure",
-    "appName" : "azure1",
-    "loadBalancerName" : "azure1-st1-d1",
-    "stack" : "st1",
-    "detail" : "d1",
-    "credentials" : "azure-test",
-    "region" : "West US",
-    "vnet" : null,
-    "probes" : [ {
-      "probeName" : "healthcheck1",
-      "probeProtocol" : "HTTP",
-      "probePort" : 7001,
-      "probePath" : "/healthcheck",
-      "probeInterval" : 10,
-      "unhealthyThreshold" : 2
-    } ],
-    "securityGroups" : null,
-    "loadBalancingRules" : [ {
-      "ruleName" : "lbRule1",
-      "protocol" : "TCP",
-      "externalPort" : "80",
-      "backendPort" : "80",
-      "probeName" : "healthcheck1",
-      "persistence" : "None",
-      "idleTimeout" : "4"
-    } ],
-    "inboundNATRules" : [ {
-      "ruleName" : "inboundRule1",
-      "serviceType" : "SSH",
-      "protocol" : "TCP",
-      "port" : "80"
-    } ],
-    "name" : "azure1-st1-d1",
-    "user" : "[anonymous]",
-    "stageDetails" : {
-      "name" : null,
-      "type" : "upsertAmazonLoadBalancer_azure",
-      "startTime" : 1447111560073,
-      "isSynthetic" : false
-    },
-    "batch.task.id.stageStart" : 41
-  }
-
-*/

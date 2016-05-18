@@ -16,18 +16,19 @@
 
 package com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.ops.converters
 
+import com.netflix.spinnaker.clouddriver.azure.AzureOperation
 import com.netflix.spinnaker.clouddriver.azure.common.AzureAtomicOperationConverterHelper
+import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.AzureLoadBalancerDescription
+import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.ops.UpsertAzureLoadBalancerAtomicOperation
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
 import com.netflix.spinnaker.clouddriver.security.AbstractAtomicOperationsCredentialsSupport
-import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.UpsertAzureLoadBalancerDescription
-import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.ops.UpsertAzureLoadBalancerAtomicOperation
-import com.netflix.spinnaker.clouddriver.azure.AzureOperation
 import groovy.util.logging.Slf4j
 import org.springframework.stereotype.Component
 
 @Slf4j
-@AzureOperation(AtomicOperations.UPSERT_LOAD_BALANCER)
+@AzureOperation("upsertLoadBalancerL4")
+//@AzureOperation(AtomicOperations.UPSERT_LOAD_BALANCER)
 @Component("upsertAzureLoadBalancerDescription")
 class UpsertAzureLoadBalancerAtomicOperationConverter extends AbstractAtomicOperationsCredentialsSupport {
   UpsertAzureLoadBalancerAtomicOperationConverter() {
@@ -38,8 +39,9 @@ class UpsertAzureLoadBalancerAtomicOperationConverter extends AbstractAtomicOper
     new UpsertAzureLoadBalancerAtomicOperation(convertDescription(input))
   }
 
-  UpsertAzureLoadBalancerDescription convertDescription(Map input) {
-    AzureAtomicOperationConverterHelper.convertDescription(input, this, UpsertAzureLoadBalancerDescription)
+  AzureLoadBalancerDescription convertDescription(Map input) {
+    AzureAtomicOperationConverterHelper.
+      convertDescription(input, this, AzureLoadBalancerDescription) as AzureLoadBalancerDescription
   }
 }
 

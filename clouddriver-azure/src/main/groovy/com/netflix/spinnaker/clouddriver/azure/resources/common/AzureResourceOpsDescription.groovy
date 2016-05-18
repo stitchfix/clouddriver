@@ -21,11 +21,14 @@ import com.netflix.spinnaker.clouddriver.azure.security.AzureCredentials
 class AzureResourceOpsDescription {
   String name
   String cloudProvider
+  String accountName
   String appName
   String stack
   String detail
   AzureCredentials credentials
   String region
   String user
-  Integer createdTime
+  Long createdTime
+  long lastReadTime
+  Map<String,String> tags = [:]
 }

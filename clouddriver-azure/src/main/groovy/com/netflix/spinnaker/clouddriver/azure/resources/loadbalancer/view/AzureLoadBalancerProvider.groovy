@@ -16,95 +16,35 @@
 
 package com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.view
 
-import com.netflix.spinnaker.clouddriver.azure.common.AzureResourceRetriever
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.netflix.spinnaker.cats.cache.Cache
+import com.netflix.spinnaker.cats.cache.CacheData
+import com.netflix.spinnaker.cats.cache.RelationshipCacheFilter
+import com.netflix.spinnaker.clouddriver.azure.AzureCloudProvider
+import com.netflix.spinnaker.clouddriver.azure.resources.common.cache.Keys
 import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.AzureLoadBalancer
 import com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model.AzureLoadBalancerDescription
-import com.netflix.spinnaker.clouddriver.model.LoadBalancerProvider
+import com.netflix.spinnaker.clouddriver.model.LoadBalancerServerGroup
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
+import org.springframework.web.bind.annotation.PathVariable
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
+import org.springframework.web.bind.annotation.RestController
 
+@RestController
 @Component
-class AzureLoadBalancerProvider implements LoadBalancerProvider<AzureLoadBalancer> {
+class AzureLoadBalancerProvider /*implements LoadBalancerProvider<AzureLoadBalancer> */ {
+
+  private final AzureCloudProvider azureCloudProvider
+  private final Cache cacheView
+  final ObjectMapper objectMapper
 
   @Autowired
-  AzureResourceRetriever azureResourceRetriever
-
-  /**
-   * Retrieves all load balancers, keyed on load balancer name
-   *
-   * @return loadBalancerName => set of load balancer objects
-   */
-  @Override
-  Map<String, Set<AzureLoadBalancer>> getLoadBalancers() {
-    return null;
-  }
-
-  /**
-   * Retrieves all load balancers for a specific account
-   *
-   * @param account
-   * @return set of load balancer objects
-   */
-  @Override
-  Set<AzureLoadBalancer> getLoadBalancers(String account) {
-    [] as Set<AzureLoadBalancer>
-  }
-
-  /**
-   * Gets the load balancers for a specified cluster in a specified account
-   *
-   * @param account
-   * @param cluster
-   * @return a set of load balancers
-   */
-  @Override
-  Set<AzureLoadBalancer> getLoadBalancers(String account, String cluster) {
-    [] as Set<AzureLoadBalancer>
-  }
-
-  /**
-   * Load balancer objects are identified by the composite key of their type, name, and region of existence. This method will return a set of load balancers of a specific type from a cluster that
-   * exists within a specified account
-   *
-   * @param account
-   * @param cluster
-   * @param type
-   * @return set of load balancers
-   */
-  @Override
-  Set<AzureLoadBalancer> getLoadBalancers(String account, String cluster, String type) {
-    [] as Set<AzureLoadBalancer>
-  }
-
-  /**
-   * This method is a more specific version of {@link #getLoadBalancers(java.lang.String, java.lang.String, java.lang.String)}, filtering down to the load balancer name. This method will return a
-   * set of load balancers, as they may exist in different regions
-   *
-   * @param account
-   * @param cluster
-   * @param type
-   * @param loadBalancerName
-   * @return set of regions
-   */
-  @Override
-  Set<AzureLoadBalancer> getLoadBalancer(String account, String cluster, String type, String loadBalancerName) {
-    def loadBalancers = [] as Set<AzureLoadBalancer>
-    loadBalancers
-  }
-
-  /**
-   * Similar to {@link #getLoadBalancer(java.lang.String, java.lang.String, java.lang.String, java.lang.String)}, except with the specificity of region
-   *
-   * @param account
-   * @param cluster
-   * @param type
-   * @param loadBalancerName
-   * @param region
-   * @return a specific load balancer
-   */
-  @Override
-  AzureLoadBalancer getLoadBalancer(String account, String cluster, String type, String loadBalancerName, String region) {
-    null
+  AzureLoadBalancerProvider(AzureCloudProvider azureCloudProvider, Cache cacheView, ObjectMapper objectMapper) {
+    this.azureCloudProvider = azureCloudProvider
+    this.cacheView = cacheView
+    this.objectMapper = objectMapper
   }
 
   /**
@@ -116,19 +56,45 @@ class AzureLoadBalancerProvider implements LoadBalancerProvider<AzureLoadBalance
    *         for each server group: its name, region, and *only* the instances attached to the load balancers described above.
    *         The instances will have a minimal amount of data, as well: name, zone, and health related to any load balancers
    */
-  @Override
-  Set<AzureLoadBalancer> getApplicationLoadBalancers(String application) {
-    List<AzureLoadBalancer> applicationLoadBalancers = new ArrayList<AzureLoadBalancer>()
+//  @Override
+  @RequestMapping(value = "/applications/{application}/loadBalancersL4", method = RequestMethod.GET)
+  Set<AzureLoadBalancer> getApplicationLoadBalancers(@PathVariable String application) {
+    getAllMatchingKeyPattern(Keys.getLoadBalancerKey(azureCloudProvider, '*', '*', application, '*', '*', '*'))
+  }
 
-    azureResourceRetriever.applicationLoadBalancerMap.each() { account, appMap ->
-      if (appMap.containsKey(application)) {
-        for (AzureLoadBalancerDescription lb : appMap[application]) {
-          def azureLB = new AzureLoadBalancer(account: account, name: lb.loadBalancerName, region: lb.region)
-          applicationLoadBalancers.add(azureLB)
-        }
-      }
-    }
-    applicationLoadBalancers
+  Set<AzureLoadBalancer> getAllMatchingKeyPattern(String pattern) {
+    loadResults(cacheView.filterIdentifiers(Keys.Namespace.AZURE_LOAD_BALANCERS.ns, pattern))
+  }
+
+  Set<AzureLoadBalancer> loadResults(Collection<String> identifiers) {
+    def transform = this.&fromCacheData
+    def data = cacheView.getAll(Keys.Namespace.AZURE_LOAD_BALANCERS.ns, identifiers, RelationshipCacheFilter.none())
+    def transformed = data.collect(transform)
+
+    return transformed
+  }
+
+  AzureLoadBalancer fromCacheData(CacheData cacheData) {
+    AzureLoadBalancerDescription loadBalancerDescription = objectMapper.convertValue(cacheData.attributes['loadbalancer'], AzureLoadBalancerDescription)
+    def parts = Keys.parse(azureCloudProvider, cacheData.id)
+
+    new AzureLoadBalancer(
+      account: parts.account ?: "none",
+      name: loadBalancerDescription.loadBalancerName,
+      region: loadBalancerDescription.region,
+      vnet: loadBalancerDescription.vnet ?: "vnet-unassigned",
+      subnet: loadBalancerDescription.subnet ?: "subnet-unassigned",
+      serverGroups: [new LoadBalancerServerGroup(name: loadBalancerDescription.serverGroup, isDisabled: false, detachedInstances: [], instances: [])]
+    )
+  }
+
+  AzureLoadBalancerDescription getLoadBalancerDescription(String account, String appName, String region, String loadBalancerName) {
+    def pattern = Keys.getLoadBalancerKey(azureCloudProvider, loadBalancerName, '*', appName, '*', region, account)
+    def identifiers = cacheView.filterIdentifiers(Keys.Namespace.AZURE_LOAD_BALANCERS.ns, pattern)
+    def data = cacheView.getAll(Keys.Namespace.AZURE_LOAD_BALANCERS.ns, identifiers, RelationshipCacheFilter.none())
+    CacheData cacheData = data? data.first() : null
+
+    cacheData? objectMapper.convertValue(cacheData.attributes['loadbalancer'], AzureLoadBalancerDescription) : null
   }
 
 }

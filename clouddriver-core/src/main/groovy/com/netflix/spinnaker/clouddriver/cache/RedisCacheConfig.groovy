@@ -17,17 +17,24 @@
 package com.netflix.spinnaker.clouddriver.cache
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.netflix.discovery.DiscoveryClient
 import com.netflix.spinnaker.cats.agent.AgentScheduler
 import com.netflix.spinnaker.cats.cache.NamedCacheFactory
 import com.netflix.spinnaker.cats.redis.JedisPoolSource
 import com.netflix.spinnaker.cats.redis.JedisSource
+import com.netflix.spinnaker.cats.redis.cache.RedisCacheOptions
 import com.netflix.spinnaker.cats.redis.cache.RedisNamedCacheFactory
 import com.netflix.spinnaker.cats.redis.cluster.AgentIntervalProvider
 import com.netflix.spinnaker.cats.redis.cluster.ClusteredAgentScheduler
-import com.netflix.spinnaker.cats.redis.cluster.DefaultAgentIntervalProvider
+import com.netflix.spinnaker.cats.redis.cluster.ClusteredSortAgentScheduler
 import com.netflix.spinnaker.cats.redis.cluster.DefaultNodeIdentity
+import com.netflix.spinnaker.cats.redis.cluster.DefaultNodeStatusProvider
+import com.netflix.spinnaker.cats.redis.cluster.NodeStatusProvider
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import redis.clients.jedis.JedisPool
@@ -37,6 +44,11 @@ import java.util.concurrent.TimeUnit
 @Configuration
 @ConditionalOnProperty('redis.connection')
 class RedisCacheConfig {
+  @Value('${redis.scheduler:default}')
+  String schedulerType
+
+  @Value('${redis.parallelism:-1}')
+  Integer parallelism
 
   @Bean
   JedisSource jedisSource(JedisPool jedisPool) {
@@ -44,8 +56,22 @@ class RedisCacheConfig {
   }
 
   @Bean
-  NamedCacheFactory cacheFactory(JedisSource jedisSource, ObjectMapper objectMapper) {
-    new RedisNamedCacheFactory(jedisSource, objectMapper)
+  @ConfigurationProperties("caching.redis")
+  RedisCacheOptions.Builder redisCacheOptionsBuilder() {
+    return RedisCacheOptions.builder();
+  }
+
+  @Bean
+  RedisCacheOptions redisCacheOptions(RedisCacheOptions.Builder redisCacheOptionsBuilder) {
+    return redisCacheOptionsBuilder.build()
+  }
+
+  @Bean
+  NamedCacheFactory cacheFactory(
+    JedisSource jedisSource,
+    ObjectMapper objectMapper,
+    RedisCacheOptions redisCacheOptions) {
+    new RedisNamedCacheFactory(jedisSource, objectMapper, redisCacheOptions, null)
   }
 
   @Bean
@@ -54,14 +80,32 @@ class RedisCacheConfig {
   }
 
   @Bean
+  @ConditionalOnBean(DiscoveryClient)
+  EurekaStatusNodeStatusProvider discoveryStatusNodeStatusProvider(DiscoveryClient discoveryClient) {
+    new EurekaStatusNodeStatusProvider(discoveryClient)
+  }
+
+  @Bean
+  @ConditionalOnMissingBean(NodeStatusProvider)
+  DefaultNodeStatusProvider nodeStatusProvider() {
+    new DefaultNodeStatusProvider()
+  }
+
+  @Bean
   @ConditionalOnProperty(value = 'caching.writeEnabled', matchIfMissing = true)
-  AgentScheduler agentScheduler(JedisSource jedisSource, @Value('${redis.connection:redis://localhost:6379}') String redisConnection, AgentIntervalProvider agentIntervalProvider) {
-    URI redisUri = URI.create(redisConnection)
-    String redisHost = redisUri.getHost()
-    int redisPort = redisUri.getPort()
-    if (redisPort == -1) {
-      redisPort = 6379
+  AgentScheduler agentScheduler(JedisSource jedisSource, @Value('${redis.connection:redis://localhost:6379}') String redisConnection, AgentIntervalProvider agentIntervalProvider, NodeStatusProvider nodeStatusProvider) {
+    if (schedulerType.equalsIgnoreCase('default')) {
+      URI redisUri = URI.create(redisConnection)
+      String redisHost = redisUri.getHost()
+      int redisPort = redisUri.getPort()
+      if (redisPort == -1) {
+        redisPort = 6379
+      }
+      new ClusteredAgentScheduler(jedisSource, new DefaultNodeIdentity(redisHost, redisPort), agentIntervalProvider, nodeStatusProvider)
+    } else if (schedulerType.equalsIgnoreCase('sort')) {
+      new ClusteredSortAgentScheduler(jedisSource, nodeStatusProvider, agentIntervalProvider, parallelism ?: -1);
+    } else {
+      throw new IllegalStateException("redis.scheduler must be one of 'default', 'sort', or ''.");
     }
-    new ClusteredAgentScheduler(jedisSource, new DefaultNodeIdentity(redisHost, redisPort), agentIntervalProvider)
   }
 }

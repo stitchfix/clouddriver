@@ -25,11 +25,10 @@ import com.google.api.client.http.HttpRequest
 import com.google.api.client.http.HttpRequestInitializer
 import com.google.api.services.compute.Compute
 import com.google.api.services.compute.model.*
-import com.netflix.frigga.NameValidation
-import com.netflix.frigga.Names
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BaseGoogleInstanceDescription
+import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.CreateGoogleHttpLoadBalancerDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.UpsertGoogleLoadBalancerDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.UpsertGoogleSecurityGroupDescription
@@ -38,7 +37,8 @@ import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleResourceN
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDisk
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDiskType
 import com.netflix.spinnaker.clouddriver.google.model.GoogleSecurityGroup
-import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
+import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleSecurityGroupProvider
 import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
 
@@ -48,14 +48,15 @@ class GCEUtil {
 
   public static final String TARGET_POOL_NAME_PREFIX = "tp"
 
-  // TODO(duftler): This list should not be static, but should also not be built on each call.
-  static final List<String> baseImageProjects = ["centos-cloud", "coreos-cloud", "debian-cloud", "google-containers",
-                                                 "opensuse-cloud", "rhel-cloud", "suse-cloud", "ubuntu-os-cloud"]
-
-  static MachineType queryMachineType(String projectName, String zone, String machineTypeName, Compute compute, Task task, String phase) {
+  static MachineType queryMachineType(String projectName, String machineTypeName, Compute compute, Task task, String phase) {
     task.updateStatus phase, "Looking up machine type $machineTypeName..."
-    def machineType = compute.machineTypes().list(projectName, zone).execute().getItems().find {
-      it.getName() == machineTypeName
+
+    Map<String, MachineTypesScopedList> zoneToMachineTypesMap = compute.machineTypes().aggregatedList(projectName).execute().items
+
+    def machineType = zoneToMachineTypesMap.collect { _, machineTypesScopedList ->
+      machineTypesScopedList.machineTypes
+    }.flatten().find { machineType ->
+      machineType.name == machineTypeName
     }
 
     if (machineType) {
@@ -70,7 +71,8 @@ class GCEUtil {
                                 Compute compute,
                                 Task task,
                                 String phase,
-                                String googleApplicationName) {
+                                String googleApplicationName,
+                                List<String> baseImageProjects) {
     task.updateStatus phase, "Looking up source image $description.image..."
 
     def imageProjects = [projectName] + description.credentials?.imageProjects + baseImageProjects - null
@@ -131,6 +133,22 @@ class GCEUtil {
       return network
     } else {
       updateStatusAndThrowNotFoundException("Network $networkName not found.", task, phase)
+    }
+  }
+
+  static Subnetwork querySubnet(String projectName, String region, String subnetName, Compute compute, Task task, String phase) {
+    task.updateStatus phase, "Looking up subnet $subnetName in $region..."
+
+    try {
+      return compute.subnetworks().get(projectName, region, subnetName).execute()
+    } catch (GoogleJsonResponseException e) {
+      // 404 is thrown, and the details are populated, if the subnet does not exist in the given region.
+      // Any other exception should be propagated directly.
+      if (e.getStatusCode() == 404 && e.details) {
+        updateStatusAndThrowNotFoundException("Subnet $subnetName not found in $region.", task, phase)
+      } else {
+        throw e
+      }
     }
   }
 
@@ -219,24 +237,11 @@ class GCEUtil {
     }
   }
 
-  static InstanceTemplate queryInstanceTemplate(String projectName, String instanceTemplateName, Compute compute) {
-    compute.instanceTemplates().get(projectName, instanceTemplateName).execute()
-  }
-
   static InstanceGroupManager queryManagedInstanceGroup(String projectName,
                                                         String zone,
                                                         String serverGroupName,
                                                         GoogleCredentials credentials) {
     credentials.compute.instanceGroupManagers().get(projectName, zone, serverGroupName).execute()
-  }
-
-  static InstanceGroupManager queryManagedInstanceGroupInRegion(String projectName,
-                                                                String region,
-                                                                String serverGroupName,
-                                                                GoogleCredentials credentials) {
-    def managedInstanceGroups = queryManagedInstanceGroups(projectName, region, credentials)
-
-    return managedInstanceGroups.find { it.name == serverGroupName }
   }
 
   static List<InstanceGroupManager> queryManagedInstanceGroups(String projectName,
@@ -251,7 +256,7 @@ class GCEUtil {
       compute.instanceGroupManagers().list(projectName, localZoneName).execute().getItems()
     }.flatten()
 
-    allMIGSInRegion
+    return allMIGSInRegion
   }
 
   static Set<String> querySecurityGroupTags(Set<String> securityGroupNames,
@@ -288,16 +293,22 @@ class GCEUtil {
     }.flatten() - null
   }
 
-  static List<String> deriveInstanceUrls(String project,
-                                         String zone,
-                                         String managedInstanceGroupName,
-                                         List<String> instanceIds,
-                                         GoogleCredentials credentials) {
-    def managedInstanceGroup = GCEUtil.queryManagedInstanceGroup(project, zone, managedInstanceGroupName, credentials)
-    def baseUrl = managedInstanceGroup.selfLink.substring(0,
-        managedInstanceGroup.getSelfLink().lastIndexOf("/instanceGroupManagers/${managedInstanceGroupName}"))
+  static GoogleServerGroup.View queryServerGroup(GoogleClusterProvider googleClusterProvider, String accountName, String region, String serverGroupName) {
+    def serverGroup = googleClusterProvider.getServerGroup(accountName, region, serverGroupName)
 
-    instanceIds.collect { instanceId -> "$baseUrl/instances/$instanceId".toString() }
+    if (!serverGroup) {
+      throw new GoogleResourceNotFoundException("Unable to locate server group $serverGroupName in $region.")
+    }
+
+    return serverGroup
+  }
+
+  static List<String> collectInstanceUrls(GoogleServerGroup.View serverGroup, List<String> instanceIds) {
+    return serverGroup.instances.findAll {
+      instanceIds.contains(it.instanceId)
+    }.collect {
+      it.selfLink
+    }
   }
 
   static List<String> mergeDescriptionAndSecurityGroupTags(List<String> tags, Set<String> securityGroupTags) {
@@ -334,7 +345,7 @@ class GCEUtil {
     if (instanceTemplateProperties.disks) {
       def bootDisk = instanceTemplateProperties.disks.find { it.getBoot() }
 
-      image = GCEUtil.getLocalName(bootDisk?.initializeParams?.sourceImage)
+      image = getLocalName(bootDisk?.initializeParams?.sourceImage)
       disks = instanceTemplateProperties.disks.collect { attachedDisk ->
         def initializeParams = attachedDisk.initializeParams
 
@@ -360,6 +371,49 @@ class GCEUtil {
       network: getLocalName(networkInterface.network),
       authScopes: retrieveScopesFromDefaultServiceAccount(instanceTemplateProperties.serviceAccounts)
     )
+  }
+
+  static BasicGoogleDeployDescription.AutoscalingPolicy buildAutoscalingPolicyDescriptionFromAutoscalingPolicy(
+    AutoscalingPolicy autoscalingPolicy) {
+    if (!autoscalingPolicy) {
+      return null
+    }
+
+    autoscalingPolicy.with {
+      def autoscalingPolicyDescription =
+          new BasicGoogleDeployDescription.AutoscalingPolicy(
+              coolDownPeriodSec: coolDownPeriodSec,
+              minNumReplicas: minNumReplicas,
+              maxNumReplicas: maxNumReplicas
+          )
+
+      if (cpuUtilization) {
+        autoscalingPolicyDescription.cpuUtilization =
+            new BasicGoogleDeployDescription.AutoscalingPolicy.CpuUtilization(
+                utilizationTarget: cpuUtilization.utilizationTarget
+            )
+      }
+
+      if (loadBalancingUtilization) {
+        autoscalingPolicyDescription.loadBalancingUtilization =
+            new BasicGoogleDeployDescription.AutoscalingPolicy.LoadBalancingUtilization(
+                utilizationTarget: loadBalancingUtilization.utilizationTarget
+            )
+      }
+
+      if (customMetricUtilizations) {
+        autoscalingPolicyDescription.customMetricUtilizations =
+            customMetricUtilizations.collect {
+              new BasicGoogleDeployDescription.AutoscalingPolicy.CustomMetricUtilization(
+                  metric: it.metric,
+                  utilizationTarget: it.utilizationTarget,
+                  utilizationTargetType: it.utilizationTargetType
+              )
+            }
+      }
+
+      return autoscalingPolicyDescription
+    }
   }
 
   static List<String> retrieveScopesFromDefaultServiceAccount(List<ServiceAccount> serviceAccounts) {
@@ -401,10 +455,15 @@ class GCEUtil {
     }
   }
 
-  static NetworkInterface buildNetworkInterface(Network network, String accessConfigName, String accessConfigType) {
+  static NetworkInterface buildNetworkInterface(Network network,
+                                                Subnetwork subnet,
+                                                String accessConfigName,
+                                                String accessConfigType) {
     def accessConfig = new AccessConfig(name: accessConfigName, type: accessConfigType)
 
-    return new NetworkInterface(network: network.selfLink, accessConfigs: [accessConfig])
+    return new NetworkInterface(network: network.selfLink,
+                                subnetwork: subnet ? subnet.selfLink : null,
+                                accessConfigs: [accessConfig])
   }
 
   static Metadata buildMetadataFromMap(Map<String, String> instanceMetadata) {
@@ -420,7 +479,7 @@ class GCEUtil {
   }
 
   static Map<String, String> buildMapFromMetadata(Metadata metadata) {
-    def map = metadata?.items?.collectEntries { Metadata.Items metadataItems ->
+    def map = metadata?.items?.collectEntries { def metadataItems ->
       [(metadataItems.key): metadataItems.value]
     }
 
@@ -429,6 +488,50 @@ class GCEUtil {
 
   static Tags buildTagsFromList(List<String> tagsList) {
     return new Tags(items: tagsList)
+  }
+
+
+  static Autoscaler buildAutoscaler(String serverGroupName,
+                                    Operation migCreateOperation,
+                                    BasicGoogleDeployDescription description) {
+    description.autoscalingPolicy.with {
+      def gceAutoscalingPolicy = new AutoscalingPolicy(coolDownPeriodSec: coolDownPeriodSec,
+                                                       minNumReplicas: minNumReplicas,
+                                                       maxNumReplicas: maxNumReplicas)
+
+      if (cpuUtilization) {
+        gceAutoscalingPolicy.cpuUtilization =
+            new AutoscalingPolicyCpuUtilization(utilizationTarget: cpuUtilization.utilizationTarget)
+      }
+
+      if (loadBalancingUtilization) {
+        gceAutoscalingPolicy.loadBalancingUtilization =
+            new AutoscalingPolicyLoadBalancingUtilization(utilizationTarget: loadBalancingUtilization.utilizationTarget)
+      }
+
+      if (customMetricUtilizations) {
+        gceAutoscalingPolicy.customMetricUtilizations = customMetricUtilizations.collect {
+          new AutoscalingPolicyCustomMetricUtilization(metric: it.metric,
+                                                       utilizationTarget: it.utilizationTarget,
+                                                       utilizationTargetType: it.utilizationTargetType)
+        }
+      }
+
+      return new Autoscaler(name: serverGroupName,
+                            zone: migCreateOperation.zone,
+                            target: migCreateOperation.targetLink,
+                            autoscalingPolicy: gceAutoscalingPolicy)
+    }
+  }
+
+  static void calibrateTargetSizeWithAutoscaler(BasicGoogleDeployDescription description) {
+    description.autoscalingPolicy.with {
+      if (description.targetSize < minNumReplicas) {
+        description.targetSize = minNumReplicas
+      } else if (description.targetSize > maxNumReplicas) {
+        description.targetSize = maxNumReplicas
+      }
+    }
   }
 
   static List<String> resolveAuthScopes(List<String> authScopes) {
@@ -457,19 +560,6 @@ class GCEUtil {
     }
 
     return scheduling
-  }
-
-  // TODO(duftler/odedmeri): We should determine if there is a better approach than this naming convention.
-  static List<String> deriveNetworkLoadBalancerNamesFromTargetPoolUrls(List<String> targetPoolUrls) {
-    if (targetPoolUrls) {
-      return targetPoolUrls.collect { targetPoolUrl ->
-        def targetPoolLocalName = getLocalName(targetPoolUrl)
-
-        targetPoolLocalName.split("-$TARGET_POOL_NAME_PREFIX-")[0]
-      }
-    } else {
-      return []
-    }
   }
 
   private static void updateStatusAndThrowNotFoundException(String errorMsg, Task task, String phase) {

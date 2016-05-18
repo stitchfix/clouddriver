@@ -18,11 +18,22 @@ package com.netflix.spinnaker.clouddriver.google.cache
 
 import com.netflix.frigga.Names
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
+import groovy.util.logging.Slf4j
 
+@Slf4j
 class Keys {
   static enum Namespace {
+    APPLICATIONS,
+    CLUSTERS,
+    IMAGES,
+    INSTANCES,
+    LOAD_BALANCERS,
+    NETWORKS,
     SECURITY_GROUPS,
-    NETWORKS
+    SERVER_GROUPS,
+    SUBNETS,
+
+    ON_DEMAND,
 
     final String ns
 
@@ -37,26 +48,96 @@ class Keys {
     }
   }
 
-  static Map<String, String> parse(GoogleCloudProvider googleCloudProvider, String key) {
+  static Map<String, String> parse(String key) {
     def parts = key.split(':')
 
-    if (parts.length < 2) {
+    if (parts.length < 2 || parts[0] != GoogleCloudProvider.GCE) {
+      return null
+    }
+
+    if (parts[0] != GoogleCloudProvider.GCE) {
       return null
     }
 
     def result = [provider: parts[0], type: parts[1]]
 
-    if (result.provider != googleCloudProvider.id) {
-      return null
-    }
-
     switch (result.type) {
-      case Namespace.SECURITY_GROUPS.ns:
-        def names = Names.parseName(parts[2])
-        result << [application: names.app, name: parts[2], id: parts[3], region: parts[4], account: parts[5]]
+      case Namespace.APPLICATIONS.ns:
+        result << [application: parts[2]]
+        break
+      case Namespace.CLUSTERS.ns:
+        def names = Names.parseName(parts[4])
+        result << [
+            application: parts[3],
+            account    : parts[2],
+            name       : parts[4],
+            cluster    : parts[4],
+            stack      : names.stack,
+            detail     : names.detail
+        ]
+        break
+      case Namespace.IMAGES.ns:
+        result << [
+            account: parts[2],
+            imageId: parts[3]
+        ]
+        break
+      case Namespace.INSTANCES.ns:
+        result << [
+            account   : parts[2],
+            region    : parts[3],
+            name      : parts[4],
+            instanceId: parts[4],
+        ]
+        break
+      case Namespace.LOAD_BALANCERS.ns:
+        def names = Names.parseName(parts[4])
+        result << [
+            account     : parts[2],
+            region      : parts[3],
+            name        : parts[4],
+            loadBalancer: parts[4],
+            application : names.app,
+            stack       : names.stack,
+            detail      : names.detail,
+        ]
         break
       case Namespace.NETWORKS.ns:
-        result << [id: parts[2], account: parts[3], region: parts[4]]
+        result << [
+            id     : parts[2],
+            account: parts[3],
+            region : parts[4]
+        ]
+        break
+      case Namespace.SECURITY_GROUPS.ns:
+        def names = Names.parseName(parts[2])
+        result << [
+            application: names.app,
+            name       : parts[2],
+            id         : parts[3],
+            region     : parts[4],
+            account    : parts[5]
+        ]
+        break
+      case Namespace.SERVER_GROUPS.ns:
+        def names = Names.parseName(parts[5])
+        result << [
+            application: names.app.toLowerCase(),
+            cluster    : parts[2],
+            account    : parts[3],
+            region     : parts[4],
+            serverGroup: parts[5],
+            stack      : names.stack,
+            detail     : names.detail,
+            sequence   : names.sequence?.toString()
+        ]
+        break
+      case Namespace.SUBNETS.ns:
+        result << [
+            id     : parts[2],
+            account: parts[3],
+            region : parts[4]
+        ]
         break
       default:
         return null
@@ -66,18 +147,56 @@ class Keys {
     result
   }
 
-  static String getSecurityGroupKey(GoogleCloudProvider googleCloudProvider,
-                                    String securityGroupName,
+  static String getApplicationKey(String application) {
+    "$GoogleCloudProvider.GCE:${Namespace.APPLICATIONS}:${application}"
+  }
+
+  static String getClusterKey(String account,
+                              String application,
+                              String clusterName) {
+    "$GoogleCloudProvider.GCE:${Namespace.CLUSTERS}:${account}:${application}:${clusterName}"
+  }
+
+  static String getImageKey(String account,
+                            String imageId) {
+    "$GoogleCloudProvider.GCE:${Namespace.IMAGES}:${account}:${imageId}"
+  }
+
+  static String getInstanceKey(String account,
+                               String region,
+                               String name) {
+    "$GoogleCloudProvider.GCE:${Namespace.INSTANCES}:${account}:${region}:${name}"
+  }
+
+  static String getLoadBalancerKey(String region,
+                                   String account,
+                                   String loadBalancerName) {
+    "$GoogleCloudProvider.GCE:${Namespace.LOAD_BALANCERS}:${account}:${region}:${loadBalancerName}"
+  }
+
+  static String getNetworkKey(String networkName,
+                              String region,
+                              String account) {
+    "$GoogleCloudProvider.GCE:${Namespace.NETWORKS}:${networkName}:${account}:${region}"
+  }
+
+  static String getSecurityGroupKey(String securityGroupName,
                                     String securityGroupId,
                                     String region,
                                     String account) {
-    "$googleCloudProvider.id:${Namespace.SECURITY_GROUPS}:${securityGroupName}:${securityGroupId}:${region}:${account}"
+    "$GoogleCloudProvider.GCE:${Namespace.SECURITY_GROUPS}:${securityGroupName}:${securityGroupId}:${region}:${account}"
   }
 
-  static String getNetworkKey(GoogleCloudProvider googleCloudProvider,
-                              String networkName,
-                              String region,
-                              String account) {
-    "$googleCloudProvider.id:${Namespace.NETWORKS}:${networkName}:${account}:${region}"
+  static String getServerGroupKey(String managedInstanceGroupName,
+                                  String account,
+                                  String region) {
+    Names names = Names.parseName(managedInstanceGroupName)
+    "$GoogleCloudProvider.GCE:${Namespace.SERVER_GROUPS}:${names.cluster}:${account}:${region}:${names.group}"
+  }
+
+  static String getSubnetKey(String subnetName,
+                             String region,
+                             String account) {
+    "$GoogleCloudProvider.GCE:${Namespace.SUBNETS}:${subnetName}:${account}:${region}"
   }
 }

@@ -23,20 +23,10 @@ package com.netflix.spinnaker.clouddriver.cache
  */
 interface OnDemandCacheUpdater {
 
-  /**
-   * Indicates if the updater is able to handle this on-demand request.
-   * @param type
-   * @return
-   */
-  @Deprecated
-  boolean handles(String type)
-
-  /**
-   * The input for the updater to process this request.
-   * @param data
-   */
-  @Deprecated
-  void handle(String type, Map<String, ? extends Object> data)
+  enum OnDemandCacheStatus {
+    SUCCESSFUL,
+    PENDING
+  }
 
   /**
    * Indicates if the updater is able to handle this on-demand request given the type and cloudProvider
@@ -44,7 +34,7 @@ interface OnDemandCacheUpdater {
    * @param cloudProvider
    * @return
    */
-  boolean handles(String type, String cloudProvider)
+  boolean handles(OnDemandAgent.OnDemandType type, String cloudProvider)
 
   /**
    * Handles the update request
@@ -52,5 +42,7 @@ interface OnDemandCacheUpdater {
    * @param cloudProvider
    * @param data
    */
-  void handle(String type, String cloudProvider, Map<String, ? extends Object> data)
+  OnDemandCacheStatus handle(OnDemandAgent.OnDemandType type, String cloudProvider, Map<String, ? extends Object> data)
+
+  Collection<Map> pendingOnDemandRequests(OnDemandAgent.OnDemandType type, String cloudProvider)
 }

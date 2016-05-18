@@ -30,6 +30,7 @@ import com.google.api.services.compute.model.InstancesScopedList
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BaseGoogleInstanceDescription
+import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleResourceNotFoundException
 import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
 import groovy.mock.interceptor.MockFor
@@ -51,6 +52,7 @@ class GCEUtilSpec extends Specification {
   private static final CREDENTIALS = new GoogleCredentials(null, null, [IMAGE_PROJECT_NAME])
   private static final BASE_DESCRIPTION_2 = new BaseGoogleInstanceDescription(image: IMAGE_NAME, credentials: CREDENTIALS)
   private static final GOOGLE_APPLICATION_NAME = "test"
+  private static final BASE_IMAGE_PROJECTS = ["centos-cloud", "ubuntu-os-cloud"]
 
   @Shared
   def taskMock
@@ -64,7 +66,7 @@ class GCEUtilSpec extends Specification {
     setup:
       def computeMock = new MockFor(Compute)
       def batchMock = new MockFor(BatchRequest)
-      def imageProjects = [PROJECT_NAME] + GCEUtil.baseImageProjects
+      def imageProjects = [PROJECT_NAME] + BASE_IMAGE_PROJECTS
       def listMock = new MockFor(Compute.Images.List)
 
       def httpTransport = GoogleNetHttpTransport.newTrustedTransport()
@@ -102,7 +104,7 @@ class GCEUtilSpec extends Specification {
             def compute = new Compute.Builder(
                     httpTransport, jsonFactory, httpRequestInitializer).setApplicationName(GOOGLE_APPLICATION_NAME).build()
 
-            sourceImage = GCEUtil.querySourceImage(PROJECT_NAME, BASE_DESCRIPTION_1, compute, taskMock, PHASE, GOOGLE_APPLICATION_NAME)
+            sourceImage = GCEUtil.querySourceImage(PROJECT_NAME, BASE_DESCRIPTION_1, compute, taskMock, PHASE, GOOGLE_APPLICATION_NAME, BASE_IMAGE_PROJECTS)
           }
         }
       }
@@ -115,7 +117,7 @@ class GCEUtilSpec extends Specification {
     setup:
       def computeMock = new MockFor(Compute)
       def batchMock = new MockFor(BatchRequest)
-      def imageProjects = [PROJECT_NAME] + [IMAGE_PROJECT_NAME] + GCEUtil.baseImageProjects
+      def imageProjects = [PROJECT_NAME] + [IMAGE_PROJECT_NAME] + BASE_IMAGE_PROJECTS
       def listMock = new MockFor(Compute.Images.List)
 
       def httpTransport = GoogleNetHttpTransport.newTrustedTransport()
@@ -153,7 +155,7 @@ class GCEUtilSpec extends Specification {
             def compute = new Compute.Builder(
                     httpTransport, jsonFactory, httpRequestInitializer).setApplicationName(GOOGLE_APPLICATION_NAME).build()
 
-            sourceImage = GCEUtil.querySourceImage(PROJECT_NAME, BASE_DESCRIPTION_2, compute, taskMock, PHASE, GOOGLE_APPLICATION_NAME)
+            sourceImage = GCEUtil.querySourceImage(PROJECT_NAME, BASE_DESCRIPTION_2, compute, taskMock, PHASE, GOOGLE_APPLICATION_NAME, BASE_IMAGE_PROJECTS)
           }
         }
       }
@@ -166,7 +168,7 @@ class GCEUtilSpec extends Specification {
     setup:
       def computeMock = new MockFor(Compute)
       def batchMock = new MockFor(BatchRequest)
-      def imageProjects = [PROJECT_NAME] + GCEUtil.baseImageProjects
+      def imageProjects = [PROJECT_NAME] + BASE_IMAGE_PROJECTS
       def listMock = new MockFor(Compute.Images.List)
 
       def httpTransport = GoogleNetHttpTransport.newTrustedTransport()
@@ -202,7 +204,7 @@ class GCEUtilSpec extends Specification {
             def compute = new Compute.Builder(
                     httpTransport, jsonFactory, httpRequestInitializer).setApplicationName(GOOGLE_APPLICATION_NAME).build()
 
-            sourceImage = GCEUtil.querySourceImage(PROJECT_NAME, BASE_DESCRIPTION_1, compute, taskMock, PHASE, GOOGLE_APPLICATION_NAME)
+            sourceImage = GCEUtil.querySourceImage(PROJECT_NAME, BASE_DESCRIPTION_1, compute, taskMock, PHASE, GOOGLE_APPLICATION_NAME, BASE_IMAGE_PROJECTS)
           }
         }
       }
@@ -245,40 +247,6 @@ class GCEUtilSpec extends Specification {
 
     then:
       roundtrippedMetadata == instanceMetadata
-  }
-
-  void "can derive network load balancer names from target pool urls"() {
-    setup:
-      def targetPoolUrls = ["https://www.googleapis.com/compute/v1/projects/shared-spinnaker/regions/us-central1/targetPools/testlb1-tp-1417811497341",
-                            "https://www.googleapis.com/compute/v1/projects/shared-spinnaker/regions/us-central1/targetPools/testlb2-tp-1417811497567"]
-
-    when:
-      def networkLoadBalancerNames = GCEUtil.deriveNetworkLoadBalancerNamesFromTargetPoolUrls(targetPoolUrls)
-
-    then:
-      networkLoadBalancerNames == ["testlb1", "testlb2"]
-  }
-
-  void "can derive network load balancer names from empty target pool urls"() {
-    setup:
-      def targetPoolUrls = []
-
-    when:
-      def networkLoadBalancerNames = GCEUtil.deriveNetworkLoadBalancerNamesFromTargetPoolUrls(targetPoolUrls)
-
-    then:
-      networkLoadBalancerNames == []
-  }
-
-  void "can derive network load balancer names from null target pool urls"() {
-    setup:
-      def targetPoolUrls = null
-
-    when:
-      def networkLoadBalancerNames = GCEUtil.deriveNetworkLoadBalancerNamesFromTargetPoolUrls(targetPoolUrls)
-
-    then:
-      networkLoadBalancerNames == []
   }
 
   void "queryInstanceUrls should return matching instances from one zone"() {
@@ -429,5 +397,22 @@ class GCEUtilSpec extends Specification {
       ["cloud-platform"]                                           | ["https://www.googleapis.com/auth/cloud-platform"]
       ["devstorage.read_only"]                                     | ["https://www.googleapis.com/auth/devstorage.read_only"]
       ["https://www.googleapis.com/auth/logging.write", "compute"] | ["https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/compute"]
+  }
+
+  @Unroll
+  void "calibrateTargetSizeWithAutoscaler should adjust target size to within autoscaler min/max range if necessary"() {
+    when:
+      def autoscalingPolicy = new BasicGoogleDeployDescription.AutoscalingPolicy(minNumReplicas: minNumReplicas, maxNumReplicas: maxNumReplicas)
+      def description = new BasicGoogleDeployDescription(targetSize: origTargetSize, autoscalingPolicy: autoscalingPolicy)
+      GCEUtil.calibrateTargetSizeWithAutoscaler(description)
+
+    then:
+      description.targetSize == expectedTargetSize
+
+    where:
+      origTargetSize | minNumReplicas | maxNumReplicas | expectedTargetSize
+      3              | 5              | 7              | 5
+      9              | 5              | 7              | 7
+      6              | 5              | 7              | 6
   }
 }

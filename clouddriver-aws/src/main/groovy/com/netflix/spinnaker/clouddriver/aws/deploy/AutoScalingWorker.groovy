@@ -17,6 +17,7 @@
 package com.netflix.spinnaker.clouddriver.aws.deploy
 import com.amazonaws.services.autoscaling.model.CreateAutoScalingGroupRequest
 import com.amazonaws.services.autoscaling.model.SuspendProcessesRequest
+import com.amazonaws.services.autoscaling.model.Tag
 import com.amazonaws.services.autoscaling.model.UpdateAutoScalingGroupRequest
 import com.amazonaws.services.ec2.model.DescribeSubnetsResult
 import com.amazonaws.services.ec2.model.Subnet
@@ -47,10 +48,12 @@ class AutoScalingWorker {
   private String freeFormDetails
   private String ami
   private String classicLinkVpcId
+  private List<String> classicLinkVpcSecurityGroups
   private String instanceType
   private String iamRole
   private String keyPair
   private String base64UserData
+  private Integer sequence
   private Boolean ignoreSequence
   private Boolean startDisabled
   private Boolean associatePublicIpAddress
@@ -69,6 +72,7 @@ class AutoScalingWorker {
   private List<String> securityGroups
   private List<String> availabilityZones
   private List<AmazonBlockDevice> blockDevices
+  private Map<String, String> tags
 
   private int minInstances
   private int maxInstances
@@ -103,7 +107,12 @@ class AutoScalingWorker {
     task.updateStatus AWS_PHASE, "Beginning ASG deployment."
 
     AWSServerGroupNameResolver awsServerGroupNameResolver = regionScopedProvider.AWSServerGroupNameResolver
-    String asgName = awsServerGroupNameResolver.resolveNextServerGroupName(application, stack, freeFormDetails, ignoreSequence)
+    String asgName
+    if (sequence != null) {
+      asgName = awsServerGroupNameResolver.generateServerGroupName(application, stack, freeFormDetails, sequence, false)
+    }  else {
+      asgName = awsServerGroupNameResolver.resolveNextServerGroupName(application, stack, freeFormDetails, ignoreSequence)
+    }
 
     def settings = new LaunchConfigurationBuilder.LaunchConfigurationSettings(
       account: credentials.name,
@@ -115,6 +124,7 @@ class AutoScalingWorker {
       ami: ami,
       iamRole: iamRole,
       classicLinkVpcId: classicLinkVpcId,
+      classicLinkVpcSecurityGroups: classicLinkVpcSecurityGroups,
       instanceType: instanceType,
       keyPair: keyPair,
       base64UserData: base64UserData,
@@ -179,6 +189,13 @@ class AutoScalingWorker {
       .withHealthCheckGracePeriod(healthCheckGracePeriod)
       .withHealthCheckType(healthCheckType)
       .withTerminationPolicies(terminationPolicies)
+
+    tags?.each { key, value ->
+      request.withTags(new Tag()
+                        .withKey(key)
+                        .withValue(value)
+                        .withPropagateAtLaunch(true))
+    }
 
     // Favor subnetIds over availability zones
     def subnetIds = subnetIds?.join(',')

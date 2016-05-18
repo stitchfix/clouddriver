@@ -18,61 +18,152 @@ package com.netflix.spinnaker.clouddriver.kubernetes.deploy
 
 import com.netflix.frigga.NameValidation
 import com.netflix.frigga.Names
+import com.netflix.spinnaker.clouddriver.kubernetes.deploy.description.servergroup.KubernetesImageDescription
+import com.netflix.spinnaker.clouddriver.kubernetes.deploy.exception.KubernetesIllegalArgumentException
 import com.netflix.spinnaker.clouddriver.kubernetes.security.KubernetesCredentials
+import io.fabric8.kubernetes.api.model.Pod
 import io.fabric8.kubernetes.api.model.ReplicationController
-import io.fabric8.kubernetes.api.model.ReplicationControllerList
-import io.fabric8.kubernetes.api.model.Service
+import io.fabric8.kubernetes.api.model.extensions.Job
+import org.springframework.beans.factory.annotation.Value
 
 class KubernetesUtil {
-
-  private static String SECURITY_GROUP_LABEL_PREFIX = "security-group-"
-  private static String LOAD_BALANCER_LABEL_PREFIX = "load-balancer-"
+  static String SECURITY_GROUP_LABEL_PREFIX = "security-group-"
+  static String LOAD_BALANCER_LABEL_PREFIX = "load-balancer-"
+  static String REPLICATION_CONTROLLER_LABEL = "replication-controller"
+  static String JOB_LABEL = "job"
+  @Value("kubernetes.defaultRegistry:gcr.io")
+  static String DEFAULT_REGISTRY
   private static int SECURITY_GROUP_LABEL_PREFIX_LENGTH = SECURITY_GROUP_LABEL_PREFIX.length()
   private static int LOAD_BALANCER_LABEL_PREFIX_LENGTH = LOAD_BALANCER_LABEL_PREFIX.length()
 
-  ReplicationControllerList getReplicationControllers(KubernetesCredentials credentials, String namespace) {
-    credentials.client.replicationControllers().inNamespace(namespace).list()
-  }
-
-  ReplicationController getReplicationController(KubernetesCredentials credentials, String namespace, String serverGroupName) {
-    credentials.client.replicationControllers().inNamespace(namespace).withName(serverGroupName).get()
-  }
-
-  Service getService(KubernetesCredentials credentials, String namespace, String service) {
-    credentials.client.services().inNamespace(namespace).withName(service).get()
-  }
-
-  Service getSecurityGroup(KubernetesCredentials credentials, String namespace, String securityGroup) {
-    getService(credentials, namespace, securityGroup)
-  }
-
-  Service getLoadBalancer(KubernetesCredentials credentials, String namespace, String loadBalancer) {
-    getService(credentials, namespace, loadBalancer)
-  }
-
-  String getNextSequence(String clusterName, String namespace, KubernetesCredentials credentials) {
+  static String getNextSequence(String clusterName, String namespace, KubernetesCredentials credentials) {
     def maxSeqNumber = -1
-    def replicationControllers = getReplicationControllers(credentials, namespace)
+    def replicationControllers = credentials.apiAdaptor.getReplicationControllers(namespace)
 
-    for (def replicationController : replicationControllers.getItems()) {
+    replicationControllers.forEach( { replicationController ->
       def names = Names.parseName(replicationController.getMetadata().getName())
 
       if (names.cluster == clusterName) {
         maxSeqNumber = Math.max(maxSeqNumber, names.sequence)
       }
-    }
+    })
 
     String.format("%03d", ++maxSeqNumber)
+  }
+
+  static List<String> getImagePullSecrets(ReplicationController rc) {
+    rc.spec?.template?.spec?.imagePullSecrets?.collect({ it.name })
+  }
+
+  static KubernetesImageDescription buildImageDescription(String image) {
+    def sIndex = image.indexOf('/')
+    def result = new KubernetesImageDescription()
+
+    // No slash means we only provided a repository name & optional tag.
+    if (sIndex < 0) {
+      result.repository = image
+    } else {
+      def sPrefix = image.substring(0, sIndex)
+
+      // Check if the content before the slash is a registry (either localhost, or a URL)
+      if (sPrefix.startsWith('localhost') || sPrefix.contains('.')) {
+        result.registry = sPrefix
+
+        image = image.substring(sIndex + 1)
+      }
+    }
+
+    def cIndex = image.indexOf(':')
+
+    if (cIndex < 0) {
+      result.repository = image
+    } else {
+      result.tag = image.substring(cIndex + 1)
+      result.repository = image.subSequence(0, cIndex)
+    }
+
+    normalizeImageDescription(result)
+    result
+  }
+
+  static Void normalizeImageDescription(KubernetesImageDescription image) {
+    if (!image.registry) {
+      image.registry = DEFAULT_REGISTRY
+    }
+
+    if (!image.tag) {
+      image.tag = "latest"
+    }
+
+    if (!image.repository) {
+      throw new IllegalArgumentException("Image descriptions must provide a repository.")
+    }
+  }
+
+  static String getImageId(KubernetesImageDescription image) {
+    return image.imageId ?: getImageId(image.registry, image.repository, image.tag)
+  }
+
+  static String getImageId(String registry, String repository, String tag) {
+    "$registry/$repository:$tag".toString()
+  }
+
+  static String validateNamespace(KubernetesCredentials credentials, String namespace) {
+    def resolvedNamespace = namespace ?: "default"
+    if (!credentials.isRegisteredNamespace(resolvedNamespace)) {
+      def error = "Registered namespaces are ${credentials.getNamespaces()}."
+      if (namespace) {
+        error = "Namespace '$namespace' was not registered with provided credentials. $error"
+      } else {
+        error = "No provided namespace assumed to mean 'default' was not registered with provided credentials. $error"
+      }
+      throw new KubernetesIllegalArgumentException(error)
+    }
+    return resolvedNamespace
+  }
+
+  static List<String> getPodLoadBalancers(Pod pod) {
+    def loadBalancers = []
+    pod.metadata?.labels?.each { key, val ->
+      if (isLoadBalancerLabel(key)) {
+        loadBalancers.push(key.substring(LOAD_BALANCER_LABEL_PREFIX_LENGTH, key.length()).toString())
+      }
+    }
+    return loadBalancers
+  }
+
+  static Map<String, String> getPodLoadBalancerStates(Pod pod) {
+    pod.metadata?.labels?.collectEntries { key, val ->
+      if (isLoadBalancerLabel(key)) {
+        return [(key): val]
+      } else {
+        return [:]
+      }
+    }
   }
 
   static List<String> getDescriptionLoadBalancers(ReplicationController rc) {
     def loadBalancers = []
     rc.spec?.template?.metadata?.labels?.each { key, val ->
-      if (key.startsWith(LOAD_BALANCER_LABEL_PREFIX)) {
+      if (isLoadBalancerLabel(key)) {
         loadBalancers.push(key.substring(LOAD_BALANCER_LABEL_PREFIX_LENGTH, key.length()))
       }
     }
     return loadBalancers
+  }
+
+  static List<String> getJobLoadBalancers(Job job) {
+    def loadBalancers = []
+    job.spec?.template?.metadata?.labels?.each { key, val ->
+      if (isLoadBalancerLabel(key)) {
+        loadBalancers.push(key.substring(LOAD_BALANCER_LABEL_PREFIX_LENGTH, key.length()))
+      }
+    }
+    return loadBalancers
+  }
+
+  static Boolean isLoadBalancerLabel(String key) {
+    key.startsWith(LOAD_BALANCER_LABEL_PREFIX)
   }
 
   static List<String> getDescriptionSecurityGroups(ReplicationController rc) {
@@ -85,12 +176,8 @@ class KubernetesUtil {
     return securityGroups
   }
 
-  static String securityGroupKey(String securityGroup) {
-    return String.format("$SECURITY_GROUP_LABEL_PREFIX%s", securityGroup)
-  }
-
   static String loadBalancerKey(String loadBalancer) {
-    return String.format("$LOAD_BALANCER_LABEL_PREFIX%s", loadBalancer)
+    return String.format("$LOAD_BALANCER_LABEL_PREFIX%s".toString(), loadBalancer)
   }
 
   static String combineAppStackDetail(String appName, String stack, String detail) {

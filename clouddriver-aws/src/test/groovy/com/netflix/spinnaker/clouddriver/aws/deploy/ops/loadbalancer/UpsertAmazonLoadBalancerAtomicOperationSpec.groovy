@@ -242,9 +242,30 @@ class UpsertAmazonLoadBalancerAtomicOperationSpec extends Specification {
     }
   }
 
+  void "should handle VPC ELB creation backward compatibility"() {
+    description.subnetType = "internal"
+    description.isInternal = null;
+    when:
+    operation.operate([])
+
+    then:
+    1 * loadBalancing.describeLoadBalancers(new DescribeLoadBalancersRequest(loadBalancerNames: ["kato-main-frontend"])) >> null
+    1 * loadBalancing.createLoadBalancer(new CreateLoadBalancerRequest(
+            loadBalancerName: "kato-main-frontend",
+            listeners: [
+                    new Listener(protocol: "HTTP", loadBalancerPort: 80, instanceProtocol: "HTTP", instancePort: 8501)
+            ],
+            subnets: ["subnet1"],
+            securityGroups: ["sg-1234"],
+            tags: [],
+            scheme: "internal"
+    )) >> new CreateLoadBalancerResult(dNSName: "dnsName1")
+    1 * mockSubnetAnalyzer.getSubnetIdsForZones(["us-east-1a"], "internal", SubnetTarget.ELB) >> ["subnet1"]
+  }
+
   void "should handle VPC ELB creation"() {
       description.subnetType = "internal"
-
+      description.isInternal = true;
       when:
       operation.operate([])
 
@@ -293,5 +314,24 @@ class UpsertAmazonLoadBalancerAtomicOperationSpec extends Specification {
     1 * loadBalancing.createLoadBalancerListeners(new CreateLoadBalancerListenersRequest(
             listeners: [ new Listener(loadBalancerPort: 80, instancePort: 8501, protocol: "HTTP", instanceProtocol: "HTTP") ]
     ))
+  }
+
+  void "should ignore the old listener of pre-2012 ELBs"() {
+    setup:
+    def oldListener = new ListenerDescription().withListener(new Listener(null, 0, 0))
+    def listener = new ListenerDescription().withListener(new Listener("HTTP", 111, 80))
+    def loadBalancer = new LoadBalancerDescription(listenerDescriptions: [oldListener, listener])
+
+    when:
+    operation.operate([])
+
+    then:
+    1 * loadBalancing.describeLoadBalancers(_) >> new DescribeLoadBalancersResult(loadBalancerDescriptions: [loadBalancer])
+    1 * loadBalancing.deleteLoadBalancerListeners(new DeleteLoadBalancerListenersRequest(loadBalancerPorts: [111]))
+    0 * loadBalancing.deleteLoadBalancerListeners(_)
+    1 * loadBalancing.createLoadBalancerListeners(new CreateLoadBalancerListenersRequest(
+      listeners: [ new Listener(loadBalancerPort: 80, instancePort: 8501, protocol: "HTTP", instanceProtocol: "HTTP") ]
+    ))
+    0 * loadBalancing.createLoadBalancerListeners(_)
   }
 }

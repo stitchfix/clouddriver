@@ -16,59 +16,88 @@
 
 package com.netflix.spinnaker.clouddriver.azure.client
 
-import com.microsoft.azure.management.network.NetworkResourceProviderService
-import com.microsoft.azure.management.network.models.AddressSpace
+import com.microsoft.azure.CloudException
+import com.microsoft.azure.credentials.ApplicationTokenCredentials
 import com.microsoft.azure.management.network.models.VirtualNetwork
-import com.microsoft.azure.management.resources.ResourceManagementClient
-import com.microsoft.azure.management.resources.ResourceManagementService
+import com.microsoft.azure.management.resources.DeploymentOperationsOperations
+import com.microsoft.azure.management.resources.DeploymentsOperations
+import com.microsoft.azure.management.resources.ProvidersOperations
+import com.microsoft.azure.management.resources.ResourceGroupsOperations
+import com.microsoft.azure.management.resources.ResourceManagementClientImpl
+import com.microsoft.azure.management.resources.ResourcesOperations
 import com.microsoft.azure.management.resources.models.Deployment
 import com.microsoft.azure.management.resources.models.DeploymentExtended
 import com.microsoft.azure.management.resources.models.DeploymentMode
 import com.microsoft.azure.management.resources.models.DeploymentOperation
-import com.microsoft.azure.management.resources.models.DeploymentOperationsListParameters
-import com.microsoft.azure.management.resources.models.DeploymentOperationsListResult
 import com.microsoft.azure.management.resources.models.DeploymentProperties
 import com.microsoft.azure.management.resources.models.ResourceGroup
-import com.microsoft.azure.management.resources.models.ResourceGroupExtended
-import com.microsoft.azure.management.resources.models.ResourceGroupListParameters
-import com.microsoft.azure.management.resources.models.ResourceGroupListResult
-import com.microsoft.azure.utility.ResourceHelper
-import com.microsoft.windowsazure.exception.ServiceException
+import com.microsoft.azure.management.resources.ResourceManagementClient
 import com.netflix.spinnaker.clouddriver.azure.common.AzureUtilities
 import com.netflix.spinnaker.clouddriver.azure.security.AzureCredentials
 import groovy.transform.Canonical
-import groovy.json.JsonBuilder
+import groovy.util.logging.Slf4j
+import okhttp3.logging.HttpLoggingInterceptor
 
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
-
-import groovy.transform.CompileStatic
-
-@CompileStatic
+@Slf4j
 class AzureResourceManagerClient extends AzureBaseClient {
 
-  AzureResourceManagerClient(String subscriptionId) {
+  private final ResourceManagementClient client
+
+  /**
+   * Client for communication with Azure Resource Management
+   * @param subscriptionId - Azure Subscription ID
+   * @param credentials - Token Credentials to use for communication with Auzre
+   */
+  AzureResourceManagerClient(String subscriptionId, ApplicationTokenCredentials credentials) {
     super(subscriptionId)
+    this.client = initializeClient(credentials)
   }
 
+  @Lazy
+  ResourceGroupsOperations resourceGroupOperations = { client.getResourceGroupsOperations() }()
+
+  @Lazy
+  DeploymentOperationsOperations deploymentOperationOperations = { client.getDeploymentOperationsOperations() }()
+
+  @Lazy
+  DeploymentsOperations deploymentOperations = {client.getDeploymentsOperations()}()
+
+  @Lazy
+  ResourcesOperations resourceOperations = {client.getResourcesOperations()}()
+
+  @Lazy
+  ProvidersOperations providerOperations = {client.getProvidersOperations()}()
+
+  /**
+   * Create a given set of resources in Azure based on template provided
+   * @param credentials - AzureCredentials to use
+   * @param template - ARM Template that defines the resources to be created
+   * @param resourceGroupName - name of the resource group where the resources will be created
+   * @param region - Azure region to create the resources in
+   * @param resourceName - name of the main resource to be created
+   * @param resourceType - type of the main resource to be created
+   * @param templateParams - key/value list of parameters to pass to the template
+   * @return
+   */
   DeploymentExtended createResourceFromTemplate(AzureCredentials credentials,
                                                 String template,
                                                 String resourceGroupName,
                                                 String region,
-                                                String resourceName) {
+                                                String resourceName,
+                                                String resourceType,
+                                                Map<String, String> templateParams = [:]) {
 
-    if (!resourceGroupExists(credentials, resourceGroupName)) {
-      createResourceGroup(credentials, resourceGroupName, region)
-      createResourceGroupVNet(credentials, resourceGroupName, region)
+    // TODO validate that all callers invoke this themselves, then remove this call
+    initializeResourceGroupAndVNet(credentials, resourceGroupName, null, region)
+
+    String deploymentName = [resourceName, resourceType, "deployment"].join(AzureUtilities.NAME_SEPARATOR)
+    if (!templateParams['location']) {
+      templateParams['location'] = region
     }
 
-    String deploymentName = resourceName + AzureUtilities.NAME_SEPARATOR +"deployment"
-    def templateParams = [location : region]
-
-    DeploymentExtended deployment = createTemplateDeployment(this.getResourceManagementClient(credentials),
+    DeploymentExtended deployment = createTemplateDeployment(client,
       resourceGroupName,
-      DeploymentMode.Incremental,
+      DeploymentMode.INCREMENTAL,
       deploymentName,
       template,
       templateParams)
@@ -76,114 +105,200 @@ class AzureResourceManagerClient extends AzureBaseClient {
     deployment
   }
 
-  ResourceGroup createResourceGroup(AzureCredentials creds, String resourceGroupName, String region) {
+  /**
+   * Create a resource group in Azure
+   * @param resourceGroupName - name of the resource group to create
+   * @param region - region to create the resource group in
+   * @return instance of the Azure SDK ResourceGroup class
+   */
+  ResourceGroup createResourceGroup(String resourceGroupName, String region) {
     try {
-      ResourceGroup resourceGroup = this.getResourceManagementClient(creds).getResourceGroupsOperations().createOrUpdate(resourceGroupName,new ResourceGroup(region)).resourceGroup
+      //Create an instance of the resource group to be passed as the "parameters" for the createOrUpdate method
+      //Set appropriate attributes of instance to define resource group
+      ResourceGroup resourceGroup = new ResourceGroup()
+      resourceGroup.setLocation(region)
 
-      resourceGroup
+      resourceGroupOperations.createOrUpdate(resourceGroupName,resourceGroup)?.body
+
     } catch (e) {
       throw new RuntimeException("Unable to create Resource Group ${resourceGroupName} in region ${region}", e)
     }
   }
 
-  ArrayList<ResourceGroup> getResourcesGroupsForApp(AzureCredentials creds, String applicationName) {
-    ResourceGroupListParameters parameters = new ResourceGroupListParameters()
-    parameters.setTagName("filter")
-    parameters.setTagValue(applicationName)
+  /**
+   * Initialize the resource group and virtual network
+   * @param creds - AzureCredentials
+   * @param resourceGroupName - name of the resource group
+   * @param virtualNetworkName - name of the virtual network to be created/initialized
+   * @param region - Azure region
+   * @return - instance of the Azure SDK ResourceGroup class
+   */
+  ResourceGroup initializeResourceGroupAndVNet(AzureCredentials creds, String resourceGroupName, String virtualNetworkName, String region) {
+    ResourceGroup resourceGroupParameters = new ResourceGroup()
+    resourceGroupParameters.setLocation(region)
+    ResourceGroup resourceGroup
+    if (!resourceGroupExists(resourceGroupName)) {
+      resourceGroup = createResourceGroup(resourceGroupName, region)
+    } else {
+      resourceGroup = resourceGroupOperations.get(resourceGroupName)?.body
+    }
 
-    this.getResourceManagementClient(creds).getResourceGroupsOperations().list(parameters).resourceGroups
+    initializeResourceGroupVNet(creds, resourceGroupName, virtualNetworkName, region)
+
+    resourceGroup
   }
 
-  boolean resourceGroupExists(AzureCredentials creds, String resourceGroupName) {
-    this.getResourceManagementClient(creds).getResourceGroupsOperations().checkExistence(resourceGroupName).isExists()
+  /**
+   * Check to see if a resource group already exists in the subscription
+   * @param resourceGroupName name of the resource group to look for
+   * @return True if it already exists
+   */
+  boolean resourceGroupExists(String resourceGroupName) {
+    resourceGroupOperations.checkExistence(resourceGroupName)?.body
   }
 
-  ArrayList<DeploymentOperation> getDeploymentOperations(AzureCredentials creds,
-                                                         String resourceGroupName,
-                                                         String deploymentName,
-                                                         Integer operationCount = 10) {
-    DeploymentOperationsListParameters parameters = new DeploymentOperationsListParameters(top: operationCount)
-    DeploymentOperationsListResult result = this.getResourceManagementClient(creds).getDeploymentOperationsOperations().list(resourceGroupName, deploymentName, parameters)
-
-    result.operations
+  /**
+   * Retrieve the operations associated with a given deployment in Azure
+   * @param resourceGroupName - name of the resource group where the deployment exists
+   * @param deploymentName - name of the deployment
+   * @param operationCount - number of operations to return. Default is 10
+   * @return List of Azure SDK DeploymentOperations objects
+   */
+  List<DeploymentOperation> getDeploymentOperations(String resourceGroupName,
+                                                    String deploymentName,
+                                                    Integer operationCount = 10) {
+    executeOp({deploymentOperationOperations.list(resourceGroupName, deploymentName, operationCount)})?.body
   }
 
-  DeploymentExtended getDeployment(AzureCredentials creds, String resourceGroupName, String deploymentName) {
-    this.getResourceManagementClient(creds).getDeploymentsOperations().get(resourceGroupName, deploymentName).deployment
+  /**
+   * Retrieve the deployment resource from Azure
+   * @param resourceGroupName - name of the resource group where the deployment exists
+   * @param deploymentName - name of the deployment
+   * @return Azure SDK DeploymentExtended object
+   */
+  DeploymentExtended getDeployment(String resourceGroupName, String deploymentName) {
+    executeOp({deploymentOperations.get(resourceGroupName, deploymentName)})?.body
   }
 
-  List<ResourceGroupExtended> getAllResourceGroups(AzureCredentials creds) {
-    this.getResourceManagementClient(creds).getResourceGroupsOperations().list(null).getResourceGroups()
-  }
-
-  String getResourceGroupLocation(String resourceGroupName, AzureCredentials creds) {
-    this.getResourceManagementClient(creds).getResourceGroupsOperations().get(resourceGroupName).getResourceGroup().getLocation()
-  }
-
-  void healthCheck(AzureCredentials creds) {
+  /**
+   * Azure Health Check
+   */
+  void healthCheck() {
     try {
-      this.getResourceManagementClient(creds).getResourcesOperations().list(null)
+      resourceOperations.list(null, 1)
     }
     catch (Exception e) {
       throw new Exception("Unable to ping Azure", e)
     }
   }
 
-  protected ResourceManagementClient getResourceManagementClient(AzureCredentials creds) {
-    ResourceManagementService.create(this.buildConfiguration(creds))
+  /**
+   * Create the virtual network resource in Azure if it does not exist
+   * @param creds - AzureCredentials instance
+   * @param resourceGroupName - name of the resource group to lookup/create the virtual network resource in
+   * @param virtualNetworkName - name of the virtual network to lookup/create
+   * @param region - Azure region to lookup/create virtual network resource in
+   */
+  private static void initializeResourceGroupVNet(AzureCredentials creds, String resourceGroupName, String virtualNetworkName = null, String region) {
+    def vNetName = virtualNetworkName ?
+      virtualNetworkName : AzureUtilities.getVirtualNetworkName(resourceGroupName)
+    VirtualNetwork vNet = null
+
+    try {
+      vNet = creds.networkClient.getVirtualNetwork(resourceGroupName, vNetName)
+    } catch (CloudException ignore) {
+      // Assumes that a cloud exception means that the rest call failed to locate the vNet
+      log.warn("Failed to locate Azure Virtual Network ${virtualNetworkName}")
+    }
+    if (!vNet) vNet = creds.networkClient.createVirtualNetwork(resourceGroupName, vNetName, region)
   }
 
-  private static void createResourceGroupVNet(AzureCredentials creds, String resourceGroupName, String region) {
-    def vNetName = AzureUtilities.VNET_NAME_PREFIX + resourceGroupName
-
-    creds.getNetworkClient().createVirtualNetwork(creds, resourceGroupName, vNetName, region)
-  }
-
+  /**
+   * Deploy the resource template to Azure
+   * @param resourceManagementClient - the Azure SDK ResourceManagementClient instance
+   * @param resourceGroupName - name of the resource group where the template will be deployed
+   * @param deploymentMode - Deployment Mode
+   * @param deploymentName - name of the deployment
+   * @param template - the ARM template to be deployed
+   * @param templateParameters - key/value list of parameters that will be passed to the template
+   * @return Azure Deployment object
+   */
   private static DeploymentExtended createTemplateDeployment(
     ResourceManagementClient resourceManagementClient,
     String resourceGroupName,
     DeploymentMode deploymentMode,
     String deploymentName,
     String template,
-    Map<String, String> templateParameters) throws URISyntaxException, IOException, ServiceException {
+    Map<String, String> templateParameters) {
 
     DeploymentProperties deploymentProperties = new DeploymentProperties()
     deploymentProperties.setMode(deploymentMode)
 
-    // set the link to template JSON
-    deploymentProperties.setTemplate(template)
+    // set the link to template JSON.
+    // Deserialize to pass it as an instance of a JSON Node object
+    deploymentProperties.setTemplate(mapper.readTree(template))
 
-    // initialize the parameters for this template
+    // initialize the parameters for resourceManagementClientthis template
     if (templateParameters) {
       Map<String, ParameterValue> parameters = new HashMap<String, ParameterValue>()
       for (Map.Entry<String, String> entry : templateParameters.entrySet()) {
         parameters.put(entry.getKey(), new ParameterValue(entry.getValue()))
       }
-      deploymentProperties.setParameters(new JsonBuilder(parameters).toString())
+
+      deploymentProperties.setParameters(mapper.readTree(mapper.writeValueAsString(parameters)))
     }
 
     // kick off the deployment
     Deployment deployment = new Deployment()
     deployment.setProperties(deploymentProperties)
 
-    return resourceManagementClient
-      .getDeploymentsOperations()
-      .createOrUpdate(resourceGroupName, deploymentName, deployment)
-      .getDeployment()
+    return resourceManagementClient?.
+      getDeploymentsOperations()?.
+      createOrUpdate(resourceGroupName, deploymentName, deployment)?.
+      body
+  }
+
+  /**
+   * initialize the Azure client that will be used for interactions(s) with this provider in Azure
+   * @param credentials - Credentials that will be used for authentication with Azure
+   * @return - an initialized instance of the Azure ResourceManagementClient object
+   */
+  private ResourceManagementClient initializeClient(ApplicationTokenCredentials credentials) {
+    ResourceManagementClient resourceManagementClient = new ResourceManagementClientImpl(credentials)
+    resourceManagementClient.setSubscriptionId(this.subscriptionId)
+    resourceManagementClient.setLogLevel(HttpLoggingInterceptor.Level.NONE)
+    resourceManagementClient
+  }
+
+  /**
+   * Register the Resource Provider in Azure
+   * @param namespace - the namespace for the Resource Provider to register
+   */
+  void registerProvider(String namespace) {
+    try {
+      if (providerOperations.get(namespace)?.body?.registrationState != "Registered") {
+        log.info("Registering Azure provider: ${namespace}")
+        providerOperations.register(namespace)
+        log.info("Azure provider ${namespace} registered")
+      }
+    } catch (Exception e) {
+      // Something went wrong. log the exception
+      log.error("Unable to register Azure Provider: ${namespace}", e)
+    }
+  }
+
+  /**
+   * The namespace for the Azure Resource Provider
+   * @return namespace of the resource provider
+   */
+  @Override
+  String getProviderNamespace() {
+    "Microsoft.Resources"
   }
 
   @Canonical
   private static class ParameterValue {
     String value
-  }
-
-  static class DeploymentState {
-    public static final String SUCCEEDED = "Succeeded"
-    public static final String FAILED = "Failed"
-    public static final String CANCELED = "Canceled"
-    public static final String READY = "Ready"
-    public static final String DELETED = "Deleted"
-    public static final String ACCEPTED = "Accepted"
   }
 
 }

@@ -19,8 +19,7 @@ package com.netflix.spinnaker.clouddriver.google.model.callbacks
 import com.google.api.services.compute.model.Instance
 import com.google.api.services.compute.model.InstanceTemplate
 import com.google.api.services.compute.model.Metadata
-import com.netflix.spinnaker.clouddriver.google.model.GoogleApplication
-import com.netflix.spinnaker.clouddriver.google.model.GoogleCluster
+
 import org.springframework.util.ClassUtils
 
 import java.text.SimpleDateFormat
@@ -28,10 +27,6 @@ import java.text.SimpleDateFormat
 class Utils {
   public static final String TARGET_POOL_NAME_PREFIX = "tp"
   public static final String SIMPLE_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSX"
-
-  // TODO(duftler): This list should be configurable.
-  public static final List<String> baseImageProjects = ["centos-cloud", "coreos-cloud", "debian-cloud", "google-containers",
-                                                        "opensuse-cloud", "rhel-cloud", "suse-cloud", "ubuntu-os-cloud"]
 
   static long getTimeFromTimestamp(String timestamp) {
     if (timestamp) {
@@ -42,9 +37,19 @@ class Utils {
   }
 
   static String getLocalName(String fullUrl) {
+    if (!fullUrl) {
+      return fullUrl
+    }
+
     int lastIndex = fullUrl.lastIndexOf('/')
 
     return lastIndex != -1 ? fullUrl.substring(lastIndex + 1) : fullUrl
+  }
+
+  static String getZoneFromInstanceUrl(String fullUrl) {
+    def zones = "zones/"
+    fullUrl.substring(fullUrl.indexOf(zones) + zones.length(),
+                      fullUrl.indexOf("instances/") - 1)
   }
 
   // TODO(duftler): Consolidate this method with the same one from kato/GCEUtil and move to a common library.
@@ -67,37 +72,6 @@ class Utils {
     }
   }
 
-  static GoogleCluster retrieveOrCreatePathToCluster(
-    Map<String, GoogleApplication> tempAppMap, String accountName, String appName, String clusterName) {
-    if (!tempAppMap[appName]) {
-      tempAppMap[appName] = new GoogleApplication(name: appName)
-    }
-
-    if (!tempAppMap[appName].clusterNames[accountName]) {
-      tempAppMap[appName].clusterNames[accountName] = new HashSet<String>()
-      tempAppMap[appName].clusters[accountName] = new HashMap<String, GoogleCluster>()
-    }
-
-    if (!tempAppMap[appName].clusters[accountName][clusterName]) {
-      tempAppMap[appName].clusters[accountName][clusterName] =
-        new GoogleCluster(name: clusterName, accountName: accountName)
-    }
-
-    tempAppMap[appName].clusterNames[accountName] << clusterName
-
-    return tempAppMap[appName].clusters[accountName][clusterName]
-  }
-
-  static Map<String, GoogleApplication> deepCopyApplicationMap(Map<String, GoogleApplication> originalAppMap) {
-    Map copyMap = new HashMap<String, GoogleApplication>()
-
-    originalAppMap.each { appNameKey, originalGoogleApplication ->
-      copyMap[appNameKey] = GoogleApplication.newInstance(originalGoogleApplication)
-    }
-
-    return copyMap
-  }
-
   static Object getImmutableCopy(def value) {
     def valueClass = value.getClass()
 
@@ -110,10 +84,6 @@ class Utils {
     } else {
       return null
     }
-  }
-
-  static String getNetworkNameFromInstance(Instance instance) {
-    return getLocalName(instance?.networkInterfaces?.getAt(0)?.network)
   }
 
   static String getNetworkNameFromInstanceTemplate(InstanceTemplate instanceTemplate) {

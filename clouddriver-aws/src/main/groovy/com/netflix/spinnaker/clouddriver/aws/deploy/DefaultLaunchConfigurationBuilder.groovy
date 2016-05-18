@@ -22,7 +22,10 @@ import com.amazonaws.services.autoscaling.model.CreateLaunchConfigurationRequest
 import com.amazonaws.services.autoscaling.model.Ebs
 import com.amazonaws.services.autoscaling.model.InstanceMonitoring
 import com.amazonaws.services.autoscaling.model.LaunchConfiguration
+import com.amazonaws.services.ec2.model.DescribeSecurityGroupsRequest
 import com.netflix.spinnaker.clouddriver.aws.AwsConfiguration
+import com.netflix.spinnaker.clouddriver.aws.AwsConfiguration.DeployDefaults
+import com.netflix.spinnaker.clouddriver.aws.deploy.userdata.LocalFileUserDataProperties
 import com.netflix.spinnaker.clouddriver.security.AccountCredentials
 import com.netflix.spinnaker.clouddriver.aws.deploy.LaunchConfigurationBuilder.LaunchConfigurationSettings
 import com.netflix.spinnaker.clouddriver.aws.deploy.userdata.UserDataProvider
@@ -33,9 +36,9 @@ import groovy.transform.CompileStatic
 import org.apache.commons.codec.binary.Base64
 import org.joda.time.LocalDateTime
 
+import java.nio.charset.Charset
 import java.util.regex.Pattern
 
-@CompileStatic
 class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
   private static final Pattern SG_PATTERN = Pattern.compile(/^sg-[0-9a-f]+$/)
 
@@ -43,15 +46,18 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
   final AsgService asgService
   final SecurityGroupService securityGroupService
   final List<UserDataProvider> userDataProviders
-  final AwsConfiguration.DeployDefaults deployDefaults
+  final LocalFileUserDataProperties localFileUserDataProperties
+  final DeployDefaults deployDefaults
 
   DefaultLaunchConfigurationBuilder(AmazonAutoScaling autoScaling, AsgService asgService,
                                     SecurityGroupService securityGroupService, List<UserDataProvider> userDataProviders,
-                                    AwsConfiguration.DeployDefaults deployDefaults) {
+                                    LocalFileUserDataProperties localFileUserDataProperties,
+                                    DeployDefaults deployDefaults) {
     this.autoScaling = autoScaling
     this.asgService = asgService
     this.securityGroupService = securityGroupService
     this.userDataProviders = (userDataProviders ?: Collections.<UserDataProvider>emptyList()) as List<UserDataProvider>
+    this.localFileUserDataProperties = localFileUserDataProperties
     this.deployDefaults = deployDefaults
   }
 
@@ -86,6 +92,12 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
       }
     }
 
+    /*
+      Copy over the original user data only if the UserDataProviders behavior is disabled.
+      This is to avoid having duplicate user data.
+     */
+    String base64UserData = (localFileUserDataProperties && !localFileUserDataProperties.enabled) ? lc.userData : null
+
     new LaunchConfigurationSettings(
       account: account.name,
       environment: account.environment,
@@ -96,7 +108,7 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
       ami: lc.imageId,
       iamRole: lc.iamInstanceProfile,
       classicLinkVpcId: lc.classicLinkVPCId,
-      classicLinkVPCSecurityGroups: lc.classicLinkVPCSecurityGroups,
+      classicLinkVpcSecurityGroups: lc.classicLinkVPCSecurityGroups,
       instanceType: lc.instanceType,
       keyPair: lc.keyName,
       associatePublicIpAddress: lc.associatePublicIpAddress,
@@ -106,7 +118,8 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
       spotPrice: lc.spotPrice,
       instanceMonitoring: lc.instanceMonitoring == null ? false : lc.instanceMonitoring.enabled,
       blockDevices: blockDevices,
-      securityGroups: lc.securityGroups
+      securityGroups: lc.securityGroups,
+      base64UserData: base64UserData
     )
   }
 
@@ -122,16 +135,29 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
       settings = settings.copyWith(suffix: createDefaultSuffix())
     }
 
-    List<String> securityGroupIds = resolveSecurityGroupIds(settings.securityGroups, subnetType)
-    if (!securityGroupIds) {
-      String applicationSecurityGroup = securityGroupService.getSecurityGroupForApplication(application, subnetType)
-      if (!applicationSecurityGroup) {
-        applicationSecurityGroup = securityGroupService.createSecurityGroup(application, subnetType)
-      }
+    Set<String> securityGroupIds = resolveSecurityGroupIds(settings.securityGroups, subnetType).toSet()
+    if (!securityGroupIds || (deployDefaults.addAppGroupToServerGroup && securityGroupIds.size() < deployDefaults.maxSecurityGroups)) {
+      def names = securityGroupService.getSecurityGroupNamesFromIds(securityGroupIds)
 
-      securityGroupIds << applicationSecurityGroup
+      String existingAppGroup = names.keySet().find { it.contains(application) }
+      if (!existingAppGroup) {
+        String applicationSecurityGroup = securityGroupService.getSecurityGroupForApplication(application, subnetType)
+        if (!applicationSecurityGroup) {
+          applicationSecurityGroup = securityGroupService.createSecurityGroup(application, subnetType)
+        }
+
+        securityGroupIds << applicationSecurityGroup
+      }
     }
-    settings = settings.copyWith(securityGroups: securityGroupIds)
+    settings = settings.copyWith(securityGroups: securityGroupIds.toList())
+
+    if (settings.classicLinkVpcSecurityGroups) {
+      if (!settings.classicLinkVpcId) {
+        throw new IllegalStateException("Can't provide classic link security groups without classiclink vpc Id")
+      }
+      List<String> classicLinkIds = resolveSecurityGroupIdsInVpc(settings.classicLinkVpcSecurityGroups, settings.classicLinkVpcId)
+      settings = settings.copyWith(classicLinkVpcSecurityGroups: classicLinkIds)
+    }
 
     String name = createName(settings)
     String userData = getUserData(
@@ -161,33 +187,43 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
     name.toString()
   }
 
-  private List<String> resolveSecurityGroupIds(List<String> securityGroupNamesAndIds, String subnetType) {
+  private List<String> resolveSecurityGroupIdsByStrategy(List<String> securityGroupNamesAndIds, Closure<Map<String, String>> nameResolver) {
     if (securityGroupNamesAndIds) {
       Collection<String> names = securityGroupNamesAndIds.toSet()
       Collection<String> ids = names.findAll { SG_PATTERN.matcher(it).matches() } as Set<String>
       names.removeAll(ids)
-
       if (names) {
-        Map<String, String> resolvedIds = securityGroupService.getSecurityGroupIdsWithSubnetPurpose(names, subnetType)
+        def resolvedIds = nameResolver.call(names.toList())
         ids.addAll(resolvedIds.values())
       }
-      ids.toList()
+      return ids.toList()
     } else {
-      []
+      return []
     }
+  }
 
+  private List<String> resolveSecurityGroupIds(List<String> securityGroupNamesAndIds, String subnetType) {
+    return resolveSecurityGroupIdsByStrategy(securityGroupNamesAndIds) { List<String> names ->
+      securityGroupService.getSecurityGroupIdsWithSubnetPurpose(names, subnetType)
+    }
+  }
+
+  private List<String> resolveSecurityGroupIdsInVpc(List<String> securityGroupNamesAndIds, String vpcId) {
+    return resolveSecurityGroupIdsByStrategy(securityGroupNamesAndIds) { List<String> names ->
+      securityGroupService.getSecurityGroupIds(names, vpcId)
+    }
   }
 
   private String getUserData(String asgName, String launchConfigName, String region, String account, String environment, String accountType, String base64UserData) {
     String data = userDataProviders?.collect { udp ->
       udp.getUserData(asgName, launchConfigName, region, account, environment, accountType)
     }?.join("\n")
-    String userDataDecoded = new String(base64UserData.decodeBase64())
+    String userDataDecoded = new String(base64UserData.decodeBase64(), Charset.forName("UTF-8"))
     data = [data, userDataDecoded].findResults { it }.join("\n")
     if (data && data.startsWith("\n")) {
       data = data.substring(1)
     }
-    data ? new String(Base64.encodeBase64(data.bytes)) : null
+    data ? new String(Base64.encodeBase64(data.bytes),  Charset.forName("UTF-8")) : null
   }
 
   private String createLaunchConfiguration(String name, String userData, LaunchConfigurationSettings settings) {
@@ -205,22 +241,11 @@ class DefaultLaunchConfigurationBuilder implements LaunchConfigurationBuilder {
       .withRamdiskId(settings.ramdiskId)
       .withEbsOptimized(settings.ebsOptimized)
       .withSpotPrice(settings.spotPrice)
+      .withClassicLinkVPCId(settings.classicLinkVpcId)
+      .withClassicLinkVPCSecurityGroups(settings.classicLinkVpcSecurityGroups)
 
     if (settings.instanceMonitoring) {
       request.withInstanceMonitoring(new InstanceMonitoring(enabled: settings.instanceMonitoring))
-    }
-
-    if (settings.classicLinkVpcId) {
-      request.withClassicLinkVPCId(settings.classicLinkVpcId)
-      if (settings.classicLinkVPCSecurityGroups) {
-        request.withClassicLinkVPCSecurityGroups(settings.classicLinkVPCSecurityGroups)
-      } else {
-        if (deployDefaults.classicLinkSecurityGroupName) {
-          def classicLinkVpcSecurityGroupIds = securityGroupService.
-            getSecurityGroupIds([deployDefaults.classicLinkSecurityGroupName], settings.classicLinkVpcId).values()
-          request.withClassicLinkVPCSecurityGroups(classicLinkVpcSecurityGroupIds)
-        }
-      }
     }
 
     if (settings.blockDevices) {

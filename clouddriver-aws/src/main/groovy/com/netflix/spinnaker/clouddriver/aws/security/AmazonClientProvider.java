@@ -34,6 +34,10 @@ import com.amazonaws.services.elasticloadbalancing.AmazonElasticLoadBalancing;
 import com.amazonaws.services.elasticloadbalancing.AmazonElasticLoadBalancingClient;
 import com.amazonaws.services.identitymanagement.AmazonIdentityManagement;
 import com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient;
+import com.amazonaws.services.lambda.AWSLambda;
+import com.amazonaws.services.lambda.AWSLambdaAsync;
+import com.amazonaws.services.lambda.AWSLambdaAsyncClient;
+import com.amazonaws.services.lambda.AWSLambdaClient;
 import com.amazonaws.services.route53.AmazonRoute53;
 import com.amazonaws.services.route53.AmazonRoute53Client;
 import com.amazonaws.services.simpleworkflow.AmazonSimpleWorkflow;
@@ -43,6 +47,7 @@ import com.amazonaws.services.sns.AmazonSNSClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.awsobjectmapper.AmazonObjectMapper;
 import org.apache.http.client.HttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.HttpClients;
 
 import java.lang.reflect.Constructor;
@@ -63,6 +68,8 @@ public class AmazonClientProvider {
   private final EddaTemplater eddaTemplater;
   private final RetryPolicy retryPolicy;
   private final List<RequestHandler2> requestHandlers;
+  private final AWSProxy proxy;
+  private final EddaTimeoutConfig eddaTimeoutConfig;
 
   public static class Builder {
     private HttpClient httpClient;
@@ -72,9 +79,18 @@ public class AmazonClientProvider {
     private RetryPolicy.BackoffStrategy backoffStrategy;
     private Integer maxErrorRetry;
     private List<RequestHandler2> requestHandlers = new ArrayList<>();
+    private AWSProxy proxy;
+    private EddaTimeoutConfig eddaTimeoutConfig;
+    private int maxConnections = 200;
+    private int maxConnectionsPerRoute = 20;
 
     public Builder httpClient(HttpClient httpClient) {
       this.httpClient = httpClient;
+      return this;
+    }
+
+    public Builder proxy(AWSProxy proxy) {
+      this.proxy = proxy;
       return this;
     }
 
@@ -108,13 +124,37 @@ public class AmazonClientProvider {
       return this;
     }
 
+    public Builder eddaTimeoutConfig(EddaTimeoutConfig eddaTimeoutConfig) {
+      this.eddaTimeoutConfig = eddaTimeoutConfig;
+      return this;
+    }
+
+    public Builder maxConnections(int maxConnections) {
+      this.maxConnections = maxConnections;
+      return this;
+    }
+
+    public Builder maxConnectionsPerRoute(int maxConnectionsPerRoute) {
+      this.maxConnectionsPerRoute = maxConnectionsPerRoute;
+      return this;
+    }
+
     public AmazonClientProvider build() {
-      HttpClient client = this.httpClient == null ? HttpClients.createDefault() : this.httpClient;
+      HttpClient client = this.httpClient;
+      if (client == null) {
+        HttpClientBuilder builder = HttpClientBuilder.create();
+        builder.setMaxConnTotal(this.maxConnections);
+        builder.setMaxConnPerRoute(this.maxConnectionsPerRoute);
+        client = builder.build();
+      }
+
       ObjectMapper mapper = this.objectMapper == null ? new AmazonObjectMapper() : this.objectMapper;
       EddaTemplater templater = this.eddaTemplater == null ? EddaTemplater.defaultTemplater() : this.eddaTemplater;
       RetryPolicy policy = buildPolicy();
+      AWSProxy proxy = this.proxy;
+      EddaTimeoutConfig eddaTimeoutConfig = this.eddaTimeoutConfig == null ? EddaTimeoutConfig.DEFAULT : this.eddaTimeoutConfig;
 
-      return new AmazonClientProvider(client, mapper, templater, policy, requestHandlers);
+      return new AmazonClientProvider(client, mapper, templater, policy, requestHandlers, proxy, eddaTimeoutConfig);
     }
 
     private RetryPolicy buildPolicy() {
@@ -145,7 +185,13 @@ public class AmazonClientProvider {
   }
 
   public AmazonClientProvider(HttpClient httpClient, ObjectMapper objectMapper) {
-    this(httpClient == null ? HttpClients.createDefault() : httpClient, objectMapper == null ? new AmazonObjectMapper() : objectMapper, EddaTemplater.defaultTemplater(), PredefinedRetryPolicies.getDefaultRetryPolicy(), Collections.emptyList());
+    this(httpClient == null ? HttpClients.createDefault() : httpClient,
+      objectMapper == null ? new AmazonObjectMapper() : objectMapper,
+      EddaTemplater.defaultTemplater(),
+      PredefinedRetryPolicies.getDefaultRetryPolicy(),
+      Collections.emptyList(),
+      null,
+      EddaTimeoutConfig.DEFAULT);
   }
 
   public static <T> T notNull(T obj, String name) {
@@ -155,12 +201,20 @@ public class AmazonClientProvider {
     return obj;
   }
 
-  public AmazonClientProvider(HttpClient httpClient, ObjectMapper objectMapper, EddaTemplater eddaTemplater, RetryPolicy retryPolicy, List<RequestHandler2> requestHandlers) {
+  public AmazonClientProvider(HttpClient httpClient,
+                              ObjectMapper objectMapper,
+                              EddaTemplater eddaTemplater,
+                              RetryPolicy retryPolicy,
+                              List<RequestHandler2> requestHandlers,
+                              AWSProxy proxy,
+                              EddaTimeoutConfig eddaTimeoutConfig) {
     this.httpClient = notNull(httpClient, "httpClient");
     this.objectMapper = notNull(objectMapper, "objectMapper");
     this.eddaTemplater = notNull(eddaTemplater, "eddaTemplater");
     this.retryPolicy = notNull(retryPolicy, "retryPolicy");
     this.requestHandlers = requestHandlers == null ? Collections.emptyList() : Collections.unmodifiableList(new ArrayList<>(requestHandlers));
+    this.proxy = proxy;
+    this.eddaTimeoutConfig = eddaTimeoutConfig;
   }
 
   /**
@@ -175,6 +229,16 @@ public class AmazonClientProvider {
     checkCredentials(amazonCredentials);
     return getProxyHandler(AmazonEC2.class, AmazonEC2Client.class, amazonCredentials, region);
 
+  }
+
+  public AWSLambda getAmazonLambda(NetflixAmazonCredentials amazonCredentials, String region) {
+    checkCredentials(amazonCredentials);
+    return getProxyHandler(AWSLambda.class, AWSLambdaClient.class, amazonCredentials, region);
+  }
+
+  public AWSLambdaAsync getAmazonLambdaAsync(NetflixAmazonCredentials amazonCredentials, String region) {
+    checkCredentials(amazonCredentials);
+    return getProxyHandler(AWSLambdaAsync.class, AWSLambdaAsyncClient.class, amazonCredentials, region);
   }
 
   public AmazonAutoScaling getAutoScaling(NetflixAmazonCredentials amazonCredentials, String region) {
@@ -281,6 +345,10 @@ public class AmazonClientProvider {
     ClientConfiguration clientConfiguration = new ClientConfiguration();
     clientConfiguration.setRetryPolicy(retryPolicy);
 
+    if (proxy != null && proxy.isProxyConfigMode()) {
+        proxy.apply(clientConfiguration);
+    }
+
     T delegate = constructor.newInstance(amazonCredentials.getCredentialsProvider(), clientConfiguration);
     for (RequestHandler2 requestHandler : requestHandlers) {
       delegate.addRequestHandler(requestHandler);
@@ -293,7 +361,7 @@ public class AmazonClientProvider {
 
   protected AmazonClientInvocationHandler getInvocationHandler(Object client, String serviceName, String region, NetflixAmazonCredentials amazonCredentials) {
     return new AmazonClientInvocationHandler(client, serviceName, eddaTemplater.getUrl(amazonCredentials.getEdda(), region),
-      this.httpClient, objectMapper);
+      this.httpClient, objectMapper, eddaTimeoutConfig);
   }
 
   private static void checkCredentials(NetflixAmazonCredentials amazonCredentials) {
@@ -302,4 +370,5 @@ public class AmazonClientProvider {
     }
   }
 }
+
 

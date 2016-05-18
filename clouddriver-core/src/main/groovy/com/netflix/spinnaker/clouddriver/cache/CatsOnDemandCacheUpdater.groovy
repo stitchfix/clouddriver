@@ -16,6 +16,10 @@
 
 package com.netflix.spinnaker.clouddriver.cache
 
+import com.netflix.spinnaker.cats.agent.Agent
+import com.netflix.spinnaker.cats.agent.AgentLock
+import com.netflix.spinnaker.cats.agent.AgentScheduler
+import com.netflix.spinnaker.cats.agent.AgentSchedulerAware
 import com.netflix.spinnaker.cats.module.CatsModule
 import com.netflix.spinnaker.cats.provider.Provider
 import groovy.util.logging.Slf4j
@@ -32,6 +36,9 @@ class CatsOnDemandCacheUpdater implements OnDemandCacheUpdater {
   private final CatsModule catsModule
 
   @Autowired
+  AgentScheduler agentScheduler
+
+  @Autowired
   public CatsOnDemandCacheUpdater(List<Provider> providers, CatsModule catsModule) {
     this.providers = providers
     this.catsModule = catsModule
@@ -44,35 +51,35 @@ class CatsOnDemandCacheUpdater implements OnDemandCacheUpdater {
   }
 
   @Override
-  boolean handles(String type) {
-    onDemandAgents.any { it.handles(type) }
-  }
-
-  @Override
-  boolean handles(String type, String cloudProvider) {
+  boolean handles(OnDemandAgent.OnDemandType type, String cloudProvider) {
     onDemandAgents.any { it.handles(type, cloudProvider) }
   }
 
   @Override
-  void handle(String type, Map<String, ? extends Object> data) {
-    Collection<OnDemandAgent> onDemandAgents = onDemandAgents.findAll { it.handles(type) }
-    handle(type, onDemandAgents, data)
-  }
-
-  @Override
-  void handle(String type, String cloudProvider, Map<String, ? extends Object> data) {
+  OnDemandCacheUpdater.OnDemandCacheStatus handle(OnDemandAgent.OnDemandType type, String cloudProvider, Map<String, ? extends Object> data) {
     Collection<OnDemandAgent> onDemandAgents = onDemandAgents.findAll { it.handles(type, cloudProvider) }
-    handle(type, onDemandAgents, data)
+    return handle(type, onDemandAgents, data)
   }
 
-  void handle(String type, Collection<OnDemandAgent> onDemandAgents, Map<String, ? extends Object> data) {
+  OnDemandCacheUpdater.OnDemandCacheStatus handle(OnDemandAgent.OnDemandType type, Collection<OnDemandAgent> onDemandAgents, Map<String, ? extends Object> data) {
+    boolean hasOnDemandResults = false
     for (OnDemandAgent agent : onDemandAgents) {
       try {
+        AgentLock lock = null;
+        if (agentScheduler.atomic && !(lock = agentScheduler.tryLock((Agent) agent))) {
+          hasOnDemandResults = true // force Orca to retry
+          continue;
+        }
         final long startTime = System.nanoTime()
         def providerCache = catsModule.getProviderRegistry().getProviderCache(agent.providerName)
         OnDemandAgent.OnDemandResult result = agent.handle(providerCache, data)
         if (result) {
+          if (agentScheduler.atomic && !(agentScheduler.lockValid(lock))) {
+            hasOnDemandResults = true // force Orca to retry
+            continue;
+          }
           if (result.cacheResult) {
+            hasOnDemandResults = !(result.cacheResult.cacheResults ?: [:]).values().flatten().isEmpty() && !agentScheduler.atomic
             agent.metricsSupport.cacheWrite {
               providerCache.putCacheResult(result.sourceAgentType, result.authoritativeTypes, result.cacheResult)
             }
@@ -84,6 +91,9 @@ class CatsOnDemandCacheUpdater implements OnDemandCacheUpdater {
               }
             }
           }
+          if (agentScheduler.atomic && !(agentScheduler.tryRelease(lock))) {
+            throw new IllegalStateException("We likely just wrote stale data. If you're seeing this, file a github issue: https://github.com/spinnaker/spinnaker/issues")
+          }
           final long elapsed = System.nanoTime() - startTime
           agent.metricsSupport.recordTotalRunTimeNanos(elapsed)
           log.info("$agent.providerName/$agent.onDemandAgentType handled $type in ${TimeUnit.NANOSECONDS.toMillis(elapsed)} millis. Payload: $data")
@@ -93,5 +103,20 @@ class CatsOnDemandCacheUpdater implements OnDemandCacheUpdater {
         log.warn("$agent.providerName/$agent.onDemandAgentType failed to handle on demand update for $type", e)
       }
     }
+
+    return hasOnDemandResults ? OnDemandCacheUpdater.OnDemandCacheStatus.PENDING : OnDemandCacheUpdater.OnDemandCacheStatus.SUCCESSFUL
+  }
+
+  @Override
+  Collection<Map> pendingOnDemandRequests(OnDemandAgent.OnDemandType type, String cloudProvider) {
+    if (agentScheduler.atomic) {
+      return []
+    }
+
+    Collection<OnDemandAgent> onDemandAgents = onDemandAgents.findAll { it.handles(type, cloudProvider) }
+    return onDemandAgents.collect {
+      def providerCache = catsModule.getProviderRegistry().getProviderCache(it.providerName)
+      it.pendingOnDemandRequests(providerCache)
+    }.flatten()
   }
 }

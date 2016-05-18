@@ -18,13 +18,21 @@ package com.netflix.spinnaker.clouddriver.kubernetes.deploy.validators
 
 import com.netflix.spinnaker.clouddriver.kubernetes.security.KubernetesCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
+import org.apache.http.conn.util.InetAddressUtils
 import org.springframework.validation.Errors
 
 class StandardKubernetesAttributeValidator {
   static final namePattern = /^[a-z0-9]+([-a-z0-9]*[a-z0-9])?$/
   static final credentialsPattern = /^[a-z0-9]+([-a-z0-9_]*[a-z0-9])?$/
   static final prefixPattern = /^[a-z0-9]+$/
+  static final pathPattern = /^\/.*$/
   static final quantityPattern = /^([+-]?[0-9.]+)([eEimkKMGTP]*[-+]?[0-9]*)$/
+  static final protocolList = ['TCP', 'UDP']
+  static final serviceTypeList = ['ClusterIP', 'NodePort', 'LoadBalancer']
+  static final sessionAffinityList = ['None', 'ClientIP']
+  static final restartPolicyList = ['Always', 'OnFailure', 'Never']
+  static final uriSchemeList = ['HTTP', 'HTTPS']
+  static final maxPort = (1 << 16) - 1
 
   String context
 
@@ -46,6 +54,21 @@ class StandardKubernetesAttributeValidator {
     result
   }
 
+  def validateByContainment(Object value, String attribute, List<Object> list) {
+    def result
+    if (list.contains(value)) {
+      result = true
+    } else {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalid (Must be one of $list)")
+      result = false
+    }
+    result
+  }
+
+  def reject(String attribute, String reason) {
+    errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalid ($reason)")
+  }
+
   def validateDetails(String value, String attribute) {
     // Details are optional.
     if (!value) {
@@ -63,6 +86,50 @@ class StandardKubernetesAttributeValidator {
     }
   }
 
+  def validatePath(String value, String attribute) {
+    if (validateNotEmpty(value, attribute)) {
+      return validateByRegex(value, attribute, pathPattern)
+    } else {
+      return false
+    }
+  }
+
+  def validateProtocol(String value, String attribute) {
+    if (validateNotEmpty(value, attribute)) {
+      return validateByContainment(value, attribute, protocolList)
+    } else {
+      return false
+    }
+  }
+
+  def validateSessionAffinity(String value, String attribute) {
+    value ? validateByContainment(value, attribute, sessionAffinityList) : null
+  }
+
+  def validateUriScheme(String value, String attribute) {
+    value ? validateByContainment(value, attribute, uriSchemeList) : null
+  }
+
+  def validateIpv4(String value, String attribute) {
+    def result = InetAddressUtils.isIPv4Address(value)
+    if (!result) {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalid (Not valid IPv4 address)")
+    }
+    result
+  }
+
+  def validateServiceType(String value, String attribute) {
+    value ? validateByContainment(value, attribute, serviceTypeList) : true
+  }
+
+  def validatePort(int port, String attribute) {
+    def result = (port >= 1 && port <= maxPort)
+    if (!result) {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalid (Must be in range [1, $maxPort])")
+    }
+    result
+  }
+
   def validateApplication(String value, String attribute) {
     if (validateNotEmpty(value, attribute)) {
       return validateByRegex(value, attribute, prefixPattern)
@@ -72,10 +139,11 @@ class StandardKubernetesAttributeValidator {
   }
 
   def validateStack(String value, String attribute) {
-    if (validateNotEmpty(value, attribute)) {
-      return validateByRegex(value, attribute, prefixPattern)
+    // Stack is optional
+    if (!value) {
+      return true
     } else {
-      return false
+      return validateByRegex(value, attribute, prefixPattern)
     }
   }
 
@@ -97,14 +165,27 @@ class StandardKubernetesAttributeValidator {
     }
   }
 
-  def validateNamespace(String value, String attribute) {
+  def validateImagePullSecret(KubernetesCredentials credentials, String value, String namespace, String attribute) {
+    if (!credentials.isRegisteredImagePullSecret(value, namespace)) {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notRegistered")
+      return false
+    }
+    return validateByRegex(value, attribute, namePattern)
+  }
+
+  def validateNamespace(KubernetesCredentials credentials, String value, String attribute) {
     // Namespace is optional, empty taken to mean 'default'.
     if (!value) {
       return true
     } else {
+      if (!credentials.isRegisteredNamespace(value)) {
+        errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notRegistered")
+        return false
+      }
       return validateByRegex(value, attribute, namePattern)
     }
   }
+
   def validateNotEmpty(Object value, String attribute) {
     def result
     if (value != "" && value != null && value != []) {
@@ -117,11 +198,11 @@ class StandardKubernetesAttributeValidator {
   }
 
   def validateCredentials(String credentials, AccountCredentialsProvider accountCredentialsProvider) {
-    def result = validateNotEmpty(credentials, "credentials")
+    def result = validateNotEmpty(credentials, "account")
     if (result) {
       def kubernetesCredentials = accountCredentialsProvider.getCredentials(credentials)
       if (!(kubernetesCredentials?.credentials instanceof KubernetesCredentials)) {
-        errors.rejectValue("${context}.credentials",  "${context}.credentials.notFound")
+        errors.rejectValue("${context}.account",  "${context}.account.notFound")
         result = false
       }
     }
@@ -139,7 +220,31 @@ class StandardKubernetesAttributeValidator {
     result
   }
 
-  def validateSource(Object value, String attribute) {
+  def validatePositive(int value, String attribute) {
+    def result
+    if (value > 0) {
+      result = true
+    } else {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notPositive")
+      result = false
+    }
+    result
+  }
+
+  def validateRestartPolicy(String value, String attribute) {
+    value ? validateByContainment(value, attribute, restartPolicyList) : null
+  }
+
+  def validateJobCloneSource(Object value, String attribute) {
+    if (!value) {
+      errors.rejectValue("${context}.${attribute}",  "${context}.${attribute}.empty")
+      return false
+    } else {
+      return validateNotEmpty(value.jobName, attribute)
+    }
+  }
+
+  def validateServerGroupCloneSource(Object value, String attribute) {
     if (!value) {
       errors.rejectValue("${context}.${attribute}",  "${context}.${attribute}.empty")
       return false

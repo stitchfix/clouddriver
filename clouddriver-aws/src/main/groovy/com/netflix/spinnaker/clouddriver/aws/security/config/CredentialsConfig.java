@@ -27,6 +27,7 @@ public class CredentialsConfig {
         private String name;
         private List<String> availabilityZones;
         private List<String> preferredZones;
+        private Boolean deprecated;
 
         public String getName() {
             return name;
@@ -51,6 +52,24 @@ public class CredentialsConfig {
         public void setPreferredZones(List<String> preferredZones) {
             this.preferredZones = preferredZones;
         }
+
+        public Boolean getDeprecated() {
+            return deprecated;
+        }
+
+        public void setDeprecated(Boolean deprecated) {
+            this.deprecated = deprecated;
+        }
+
+        Region copyOf() {
+            Region clone = new Region();
+            clone.setName(getName());
+            clone.setAvailabilityZones(getAvailabilityZones());
+            clone.setPreferredZones(getPreferredZones());
+            clone.setDeprecated(getDeprecated());
+
+            return clone;
+        }
     }
 
     public static class Account {
@@ -60,6 +79,7 @@ public class CredentialsConfig {
         private String accountId;
         private String defaultKeyPair;
         private List<Region> regions;
+        private List<String> defaultSecurityGroups;
         private List<String> requiredGroupMembership;
         private String edda;
         private Boolean eddaEnabled;
@@ -120,7 +140,15 @@ public class CredentialsConfig {
             this.regions = regions;
         }
 
-        public List<String> getRequiredGroupMembership() {
+        public List<String> getDefaultSecurityGroups() {
+            return defaultSecurityGroups;
+        }
+
+        public void setDefaultSecurityGroups(List<String> defaultSecurityGroups) {
+            this.defaultSecurityGroups = defaultSecurityGroups;
+        }
+
+      public List<String> getRequiredGroupMembership() {
             return requiredGroupMembership;
         }
 
@@ -211,6 +239,7 @@ public class CredentialsConfig {
 
     private String defaultKeyPairTemplate;
     private List<Region> defaultRegions;
+    private List<String> defaultSecurityGroups;
     private String defaultEddaTemplate;
     private String defaultFront50Template;
     private String defaultBastionHostTemplate;
@@ -236,7 +265,15 @@ public class CredentialsConfig {
         this.defaultRegions = defaultRegions;
     }
 
-    public String getDefaultEddaTemplate() {
+    public List<String> getDefaultSecurityGroups() {
+        return defaultSecurityGroups;
+    }
+
+    public void setDefaultSecurityGroups(List<String> defaultSecurityGroups) {
+        this.defaultSecurityGroups = defaultSecurityGroups;
+    }
+
+  public String getDefaultEddaTemplate() {
         return defaultEddaTemplate;
     }
 

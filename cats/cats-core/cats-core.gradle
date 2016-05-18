@@ -1,5 +1,3 @@
 dependencies {
-  compile spinnaker.dependency("frigga")
-
   testCompile project(":cats:cats-test")
 }

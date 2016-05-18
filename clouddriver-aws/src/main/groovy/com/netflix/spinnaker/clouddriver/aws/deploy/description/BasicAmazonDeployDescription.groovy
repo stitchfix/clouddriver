@@ -45,15 +45,27 @@ class BasicAmazonDeployDescription extends AbstractAmazonCredentialsDescription 
   Boolean ebsOptimized
   String base64UserData
 
+  String classicLinkVpcId
+  List<String> classicLinkVpcSecurityGroups
+
+  /**
+   * If specified, this sequence number will be used when generating the server group name.
+   *
+   * Expectation is on the caller to ensure that an explicitly provided sequence number is not already in use.
+   */
+  Integer sequence
+
   boolean ignoreSequence
   boolean startDisabled
 
   List<AmazonBlockDevice> blockDevices
+  Boolean useAmiBlockDeviceMappings
   List<String> loadBalancers
   List<String> securityGroups
   Map<String, List<String>> availabilityZones = [:]
   Capacity capacity = new Capacity()
   Source source = new Source()
+  Map<String, String> tags
 
   @Canonical
   static class Capacity {

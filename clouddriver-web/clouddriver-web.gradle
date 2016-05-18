@@ -1,8 +1,9 @@
 apply plugin: 'spring-boot'
-apply plugin: 'nebula.ospackage'
+apply plugin: 'spinnaker.package'
 
 ext {
   springConfigLocation = System.getProperty('spring.config.location', "${System.getProperty('user.home')}/.spinnaker/")
+  repackage = System.getProperty('springBoot.repackage', "false")
 }
 
 tasks.withType(org.springframework.boot.gradle.run.BootRunTask) {
@@ -12,21 +13,27 @@ tasks.withType(org.springframework.boot.gradle.run.BootRunTask) {
 configurations.all {
   exclude group: 'javax.servlet', module: 'servlet-api'
   exclude group: "org.slf4j", module: "slf4j-log4j12"
+  resolutionStrategy.force 'com.microsoft.rest:client-runtime:1.0.0-20160309.002843-19'
+}
+
+repositories {
+  maven { url "http://adxsnapshots.azurewebsites.net" }
 }
 
 dependencies {
-  compile project(':kato:kato-web')
-  compile project(':oort:oort-web')
-  compile project(':mort:mort-web')
-
+  compile project(':clouddriver-titus')
+  compile project(':clouddriver-aws')
   compile project(':clouddriver-azure')
   compile project(':clouddriver-cf')
   compile project(':clouddriver-google')
   compile project(':clouddriver-kubernetes')
+  compile project(':clouddriver-docker')
+  compile project(':clouddriver-eureka')
 
   compile 'javax.ws.rs:jsr311-api:1.1.1'
   runtime spinnaker.dependency('kork')
   compile spinnaker.dependency('korkWeb')
+  compile spinnaker.dependency('korkSwagger')
   compile spinnaker.dependency('bootActuator')
   compile spinnaker.dependency('bootDataRest')
   testCompile ("org.springframework.boot:spring-boot-starter-test")
@@ -34,83 +41,4 @@ dependencies {
   runtime 'org.eclipse.jetty:jetty-servlets:9.2.11.v20150529'
 }
 
-tasks.bootRepackage.enabled = false
-
-applicationName = 'clouddriver'
-applicationDefaultJvmArgs = ["-Djava.security.egd=file:/dev/./urandom"]
-applicationDistribution.from(project.file('config')) {
-  into 'config'
-}
-
-sourceSets {
-  main {
-    resources {
-      srcDir 'src/main/resources'
-      srcDir 'config'
-    }
-  }
-}
-
-jar {
-  doFirst {
-    exclude "${rootProject.name}.yml"
-  }
-}
-
-startScripts {
-  defaultJvmOpts = applicationDefaultJvmArgs + ["-Dspring.config.location=/opt/spinnaker/config/"]
-  doLast {
-    unixScript.text = unixScript.text.replace('DEFAULT_JVM_OPTS=', '''\
-        if [ -f /etc/default/spinnaker ]; then
-          set -a
-          . /etc/default/spinnaker
-          set +a
-        fi
-        DEFAULT_JVM_OPTS='''.stripIndent())
-    unixScript.text = unixScript.text.replace('CLASSPATH=$APP_HOME', 'CLASSPATH=$APP_HOME/config:$APP_HOME')
-    windowsScript.text = windowsScript.text.replace('set CLASSPATH=', 'set CLASSPATH=%APP_HOME%\\config;')
-  }
-}
-
-String toVers(String v) {
-  int idx = v.indexOf('-')
-  if (idx != -1) {
-    return v.substring(0, idx)
-  }
-  return v
-}
-
-ospackage {
-  packageName = "spinnaker-" + project.applicationName
-  version = toVers(project.version.toString())
-  release '4'
-  into "/opt/${project.applicationName}"
-  from ("${project.buildDir}/install/${project.applicationName}")
-
-// installer scripts
-  postInstall = file('pkg_scripts/postInstall.sh')
-  postUninstall = file('pkg_scripts/postUninstall.sh')
-
-  from(file('etc/init/clouddriver.conf')) {
-    into('/etc/init')
-    user = 'root'
-    permissionGroup = 'root'
-    fileType = CONFIG | NOREPLACE
-  }
-
-  from(file('etc/logrotate.d/clouddriver')) {
-    into('/etc/logrotate.d')
-    user = 'root'
-    permissionGroup = 'root'
-    fileType = CONFIG | NOREPLACE
-  }
-}
-
-buildDeb {
-  dependsOn installDist
-}
-
-buildRpm {
-  dependsOn installDist
-  os LINUX
-}
+tasks.bootRepackage.enabled = project.repackage

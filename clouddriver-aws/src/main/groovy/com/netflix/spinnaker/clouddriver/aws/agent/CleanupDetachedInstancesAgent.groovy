@@ -33,8 +33,8 @@ import java.util.concurrent.TimeUnit
 
 @Slf4j
 class CleanupDetachedInstancesAgent implements RunnableAgent, CustomScheduledAgent {
-  public static final long DEFAULT_POLL_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(5)
-  public static final long DEFAULT_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(2)
+  public static final long DEFAULT_POLL_INTERVAL_MILLIS = TimeUnit.MINUTES.toMillis(10)
+  public static final long DEFAULT_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(20)
 
   final AmazonClientProvider amazonClientProvider
   final Collection<NetflixAmazonCredentials> accounts
@@ -85,8 +85,13 @@ class CleanupDetachedInstancesAgent implements RunnableAgent, CustomScheduledAge
           }
 
           if (instanceIdsToTerminate) {
-            log.info("Terminating instances (instanceIds: ${instanceIdsToTerminate.join(",")})")
-            amazonEC2.terminateInstances(new TerminateInstancesRequest().withInstanceIds(instanceIdsToTerminate))
+            // terminate up to 20 instances at a time (avoids any AWS limits on # of concurrent terminations)
+            instanceIdsToTerminate.collate(20).each {
+              log.info("Terminating instances in ${credentials.name}/${region.name} (instanceIds: ${it.join(",")})")
+              amazonEC2.terminateInstances(new TerminateInstancesRequest().withInstanceIds(it))
+              Thread.sleep(500)
+            }
+
           }
 
           if (result.nextToken) {

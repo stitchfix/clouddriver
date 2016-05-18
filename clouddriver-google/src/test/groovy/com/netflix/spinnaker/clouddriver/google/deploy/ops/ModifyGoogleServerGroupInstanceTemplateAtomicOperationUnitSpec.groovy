@@ -26,6 +26,7 @@ import com.google.api.services.compute.model.Metadata
 import com.google.api.services.compute.model.NetworkInterface
 import com.google.api.services.compute.model.Operation
 import com.google.api.services.compute.model.Tags
+import com.google.api.services.compute.model.Zone
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.config.GoogleConfigurationProperties
@@ -33,6 +34,8 @@ import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
 import com.netflix.spinnaker.clouddriver.google.deploy.GoogleOperationPoller
 import com.netflix.spinnaker.clouddriver.google.deploy.description.ModifyGoogleServerGroupInstanceTemplateDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleOperationException
+import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
 import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
 import spock.lang.Specification
 import spock.lang.Subject
@@ -46,6 +49,8 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
   private static final PROJECT_NAME = "my_project"
   private static final SERVER_GROUP_NAME = "spinnaker-test-v000"
   private static final ZONE = "us-central1-b"
+  private static final REGION = "us-central1"
+  private static final REGION_URL = "https://www.googleapis.com/compute/v1/projects/$PROJECT_NAME/regions/$REGION"
 
   private static final MACHINE_TYPE = "f1-micro"
   private static final NETWORK_1 = "default"
@@ -71,6 +76,8 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
 
   void "should not make any changes if no properties are overridden"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def instanceTemplatesMock = Mock(Compute.InstanceTemplates)
       def instanceTemplatesGetMock = Mock(Compute.InstanceTemplates.Get)
@@ -97,15 +104,19 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
       def instanceGroupManagerReal = new InstanceGroupManager(instanceTemplate: ORIG_INSTANCE_TEMPLATE_URL, group: SERVER_GROUP_NAME)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new ModifyGoogleServerGroupInstanceTemplateDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                               zone: ZONE,
+                                                                               region: REGION,
                                                                                accountName: ACCOUNT_NAME,
                                                                                credentials: credentials)
       @Subject def operation = new ModifyGoogleServerGroupInstanceTemplateAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
+
+    then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
 
     then:
       // Query the managed instance group and its instance template.
@@ -119,6 +130,8 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
 
   void "should set metadata and tags on new instance template"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def globalOperations = Mock(Compute.GlobalOperations)
       def instanceTemplatesMock = Mock(Compute.InstanceTemplates)
@@ -158,7 +171,7 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
       def instanceTemplatesDeleteMock = Mock(Compute.InstanceTemplates.Delete)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new ModifyGoogleServerGroupInstanceTemplateDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                               zone: ZONE,
+                                                                               region: REGION,
                                                                                instanceMetadata: METADATA_2,
                                                                                tags: TAGS_2,
                                                                                accountName: ACCOUNT_NAME,
@@ -166,9 +179,13 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
       @Subject def operation = new ModifyGoogleServerGroupInstanceTemplateAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
+
+    then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
 
     then:
       // Query the managed instance group and its instance template.
@@ -208,6 +225,8 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
 
   void "should throw exception if no original instance template properties can be resolved"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def instanceTemplatesMock = Mock(Compute.InstanceTemplates)
       def instanceTemplatesGetMock = Mock(Compute.InstanceTemplates.Get)
@@ -217,15 +236,19 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
       def instanceGroupManagerReal = new InstanceGroupManager(instanceTemplate: ORIG_INSTANCE_TEMPLATE_URL, group: SERVER_GROUP_NAME)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new ModifyGoogleServerGroupInstanceTemplateDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                               zone: ZONE,
+                                                                               region: REGION,
                                                                                accountName: ACCOUNT_NAME,
                                                                                credentials: credentials)
       @Subject def operation = new ModifyGoogleServerGroupInstanceTemplateAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
+
+    then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
 
     then:
       // Query the managed instance group and its instance template.
@@ -243,6 +266,8 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
   @Unroll
   void "should throw exception if the original instance template defines a number of network interfaces other than one"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def instanceTemplatesMock = Mock(Compute.InstanceTemplates)
       def instanceTemplatesGetMock = Mock(Compute.InstanceTemplates.Get)
@@ -268,15 +293,19 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
       def instanceGroupManagerReal = new InstanceGroupManager(instanceTemplate: ORIG_INSTANCE_TEMPLATE_URL, group: SERVER_GROUP_NAME)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new ModifyGoogleServerGroupInstanceTemplateDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                               zone: ZONE,
+                                                                               region: REGION,
                                                                                accountName: ACCOUNT_NAME,
                                                                                credentials: credentials)
       @Subject def operation = new ModifyGoogleServerGroupInstanceTemplateAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
+
+    then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
 
     then:
       // Query the managed instance group and its instance template.
@@ -301,6 +330,8 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
   @Unroll
   void "should throw exception if the original instance template does not define any disks"() {
     setup:
+      def googleClusterProviderMock = Mock(GoogleClusterProvider)
+      def serverGroup = new GoogleServerGroup(zone: ZONE).view
       def computeMock = Mock(Compute)
       def instanceTemplatesMock = Mock(Compute.InstanceTemplates)
       def instanceTemplatesGetMock = Mock(Compute.InstanceTemplates.Get)
@@ -321,15 +352,19 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperationUnitSpec extends Spe
       def instanceGroupManagerReal = new InstanceGroupManager(instanceTemplate: ORIG_INSTANCE_TEMPLATE_URL, group: SERVER_GROUP_NAME)
       def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def description = new ModifyGoogleServerGroupInstanceTemplateDescription(serverGroupName: SERVER_GROUP_NAME,
-                                                                               zone: ZONE,
+                                                                               region: REGION,
                                                                                accountName: ACCOUNT_NAME,
                                                                                credentials: credentials)
       @Subject def operation = new ModifyGoogleServerGroupInstanceTemplateAtomicOperation(description)
       operation.googleOperationPoller =
           new GoogleOperationPoller(googleConfigurationProperties: new GoogleConfigurationProperties())
+      operation.googleClusterProvider = googleClusterProviderMock
 
     when:
       operation.operate([])
+
+    then:
+      1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
 
     then:
       // Query the managed instance group and its instance template.

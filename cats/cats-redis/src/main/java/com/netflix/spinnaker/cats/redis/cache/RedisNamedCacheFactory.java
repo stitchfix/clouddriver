@@ -25,14 +25,18 @@ public class RedisNamedCacheFactory implements NamedCacheFactory {
 
     private final JedisSource jedisSource;
     private final ObjectMapper objectMapper;
+    private final RedisCacheOptions options;
+    private final RedisCache.CacheMetrics cacheMetrics;
 
-    public RedisNamedCacheFactory(JedisSource jedisSource, ObjectMapper objectMapper) {
+    public RedisNamedCacheFactory(JedisSource jedisSource, ObjectMapper objectMapper, RedisCacheOptions options, RedisCache.CacheMetrics cacheMetrics) {
         this.jedisSource = jedisSource;
         this.objectMapper = objectMapper;
+        this.options = options;
+        this.cacheMetrics = cacheMetrics;
     }
 
     @Override
     public WriteableCache getCache(String name) {
-        return new RedisCache(name, jedisSource, objectMapper);
+        return new RedisCache(name, jedisSource, objectMapper, options, cacheMetrics);
     }
 }

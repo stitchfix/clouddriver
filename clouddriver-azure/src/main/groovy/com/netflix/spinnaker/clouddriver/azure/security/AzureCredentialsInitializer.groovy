@@ -46,6 +46,8 @@ class AzureCredentialsInitializer {
           managedAccount.tenantId,
           managedAccount.subscriptionId,
           managedAccount.regions,
+          managedAccount.vmImages,
+          managedAccount.customImages,
           azureApplicationName
         )
 

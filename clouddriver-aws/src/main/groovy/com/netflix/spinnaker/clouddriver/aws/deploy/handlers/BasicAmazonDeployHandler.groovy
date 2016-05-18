@@ -18,8 +18,12 @@ package com.netflix.spinnaker.clouddriver.aws.deploy.handlers
 
 import com.amazonaws.services.autoscaling.model.BlockDeviceMapping
 import com.amazonaws.services.autoscaling.model.DescribeAutoScalingGroupsRequest
+import com.amazonaws.services.autoscaling.model.LaunchConfiguration
+import com.amazonaws.services.ec2.model.DescribeSecurityGroupsRequest
 import com.google.common.annotations.VisibleForTesting
+import com.netflix.frigga.Names
 import com.netflix.spinnaker.clouddriver.aws.AwsConfiguration
+import com.netflix.spinnaker.clouddriver.aws.deploy.BlockDeviceConfig
 import com.netflix.spinnaker.clouddriver.aws.security.NetflixAmazonCredentials
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
@@ -29,7 +33,6 @@ import com.netflix.spinnaker.clouddriver.deploy.DeploymentResult
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
 import com.netflix.spinnaker.clouddriver.aws.deploy.AmiIdResolver
 import com.netflix.spinnaker.clouddriver.aws.deploy.AutoScalingWorker
-import com.netflix.spinnaker.clouddriver.aws.deploy.BlockDeviceConfig
 import com.netflix.spinnaker.clouddriver.aws.deploy.ResolvedAmiResult
 import com.netflix.spinnaker.clouddriver.aws.deploy.description.BasicAmazonDeployDescription
 import com.netflix.spinnaker.clouddriver.aws.deploy.ops.loadbalancer.UpsertAmazonLoadBalancerResult
@@ -99,31 +102,96 @@ class BasicAmazonDeployHandler implements DeployHandler<BasicAmazonDeployDescrip
       def amazonEC2 = regionScopedProvider.amazonEC2
 
       String classicLinkVpcId = null
+      List<String> classicLinkVpcSecurityGroups = null
       if (!subnetType) {
         def result = amazonEC2.describeVpcClassicLink()
-        def classicLinkVpc = result.vpcs.find { it.classicLinkEnabled }
-        if (classicLinkVpc) {
-          classicLinkVpcId = classicLinkVpc.vpcId
+        classicLinkVpcId = result.vpcs.find { it.classicLinkEnabled }?.vpcId
+        if (classicLinkVpcId) {
+          Set<String> classicLinkGroupNames = []
+          classicLinkGroupNames.addAll(description.classicLinkVpcSecurityGroups ?: [])
+          if (deployDefaults.classicLinkSecurityGroupName) {
+            classicLinkGroupNames.addAll(deployDefaults.classicLinkSecurityGroupName)
+          }
+
+          // if we have provided groups and a vpcId, resolve them back to names to handle the case of cloning
+          // from a Server Group in a different region
+          if (description.classicLinkVpcId && description.classicLinkVpcSecurityGroups) {
+            def groupIds = classicLinkGroupNames.findAll { it.matches(~/sg-[0-9a-f]+/) } ?: []
+            classicLinkGroupNames.removeAll(groupIds)
+            if (groupIds) {
+              def describeSG = new DescribeSecurityGroupsRequest().withGroupIds(groupIds)
+              def provider = sourceRegionScopedProvider ?: regionScopedProvider
+              def resolvedNames = provider.amazonEC2.describeSecurityGroups(describeSG).securityGroups.findResults {
+                if (it.vpcId == description.classicLinkVpcId && groupIds.contains(it.groupId)) {
+                  return it.groupName
+                }
+                return null
+              } ?: []
+
+              if (resolvedNames.size() != groupIds.size()) {
+                throw new IllegalStateException("failed to look up classic link security groups, had $groupIds found $resolvedNames")
+              }
+              classicLinkGroupNames.addAll(resolvedNames)
+            }
+          }
+
+          if (deployDefaults.addAppGroupsToClassicLink) {
+            //if we cloned to a new cluster, don't bring along the old clusters groups
+            if (description.source) {
+              def srcName = Names.parseName(description.source.asgName)
+              boolean mismatch = false
+              if (srcName.app != description.application) {
+                classicLinkGroupNames.remove(srcName.app)
+                mismatch = true
+              }
+              if (srcName.stack && (mismatch || srcName.stack != description.stack)) {
+                classicLinkGroupNames.remove("${srcName.app}-${srcName.stack}".toString())
+                mismatch = true
+              }
+              if (srcName.detail && (mismatch || srcName.detail != description.freeFormDetails)) {
+                classicLinkGroupNames.remove("${srcName.app}-${srcName.stack ?: ''}-${srcName.detail}")
+              }
+            }
+            def groupNamesToLookUp = []
+            if (!classicLinkGroupNames.contains(description.application)) {
+              groupNamesToLookUp.add(description.application)
+            }
+            if (description.stack) {
+              String stackGroup = "${description.application}-${description.stack}"
+              if (!classicLinkGroupNames.contains(stackGroup)) {
+                groupNamesToLookUp.add(stackGroup)
+              }
+            }
+            if (description.freeFormDetails) {
+              String clusterGroup = "${description.application}-${description.stack ?: ''}-${description.freeFormDetails}"
+              if (!classicLinkGroupNames.contains(clusterGroup)) {
+                groupNamesToLookUp.add(clusterGroup)
+              }
+            }
+            if (groupNamesToLookUp && classicLinkGroupNames.size() < deployDefaults.maxClassicLinkSecurityGroups) {
+              def appGroups = regionScopedProvider.securityGroupService.getSecurityGroupIds(groupNamesToLookUp, classicLinkVpcId, false)
+              for (String name : groupNamesToLookUp) {
+                if (appGroups.containsKey(name)) {
+                  if (classicLinkGroupNames.size() < deployDefaults.maxClassicLinkSecurityGroups) {
+                    classicLinkGroupNames.add(name)
+                  } else {
+                    task.updateStatus(BASE_PHASE, "Not adding $name to classicLinkVpcSecurityGroups, already have $deployDefaults.maxClassicLinkSecurityGroups groups")
+                  }
+                }
+              }
+            }
+          }
+          classicLinkVpcSecurityGroups = classicLinkGroupNames.toList()
+          task.updateStatus(BASE_PHASE, "Attaching $classicLinkGroupNames as classicLinkVpcSecurityGroups")
         }
       }
 
-      def blockDeviceMappingForInstanceType = BlockDeviceConfig.blockDevicesByInstanceType[description.instanceType]
-      if (blockDeviceMappingForInstanceType) {
-        description.blockDevices = blockDeviceMappingForInstanceType
+      if (description.blockDevices == null) {
+        description.blockDevices = BlockDeviceConfig.blockDevicesByInstanceType[description.instanceType]
       }
-
-      // find by 1) result of a previous step (we performed allow launch)
-      //         2) explicitly granted launch permission
-      //            (making this the default because AllowLaunch will always
-      //             stick an explicit launch permission on the image)
-      //         3) owner
-      //         4) global
       ResolvedAmiResult ami = priorOutputs.find({
         it instanceof ResolvedAmiResult && it.region == region && it.amiName == description.amiName
-      }) ?:
-        AmiIdResolver.resolveAmiId(amazonEC2, region, description.amiName, null, description.credentials.accountId) ?:
-          AmiIdResolver.resolveAmiId(amazonEC2, region, description.amiName, description.credentials.accountId) ?:
-            AmiIdResolver.resolveAmiId(amazonEC2, region, description.amiName, null, null)
+      }) ?: AmiIdResolver.resolveAmiIdFromAllSources(amazonEC2, region, description.amiName, description.credentials.accountId)
 
       if (!ami) {
         throw new IllegalArgumentException("unable to resolve AMI imageId from $description.amiName")
@@ -135,6 +203,10 @@ class BasicAmazonDeployHandler implements DeployHandler<BasicAmazonDeployDescrip
         throw new IllegalArgumentException("Unsupported account type ${account.class.simpleName} for this operation")
       }
 
+      if (description.useAmiBlockDeviceMappings) {
+        description.blockDevices = convertBlockDevices(ami.blockDeviceMappings)
+      }
+
       def autoScalingWorker = new AutoScalingWorker(
         application: description.application,
         region: region,
@@ -143,12 +215,14 @@ class BasicAmazonDeployHandler implements DeployHandler<BasicAmazonDeployDescrip
         freeFormDetails: description.freeFormDetails,
         ami: ami.amiId,
         classicLinkVpcId: classicLinkVpcId,
+        classicLinkVpcSecurityGroups: classicLinkVpcSecurityGroups,
         minInstances: description.capacity.min,
         maxInstances: description.capacity.max,
         desiredInstances: description.capacity.desired,
         securityGroups: description.securityGroups,
         iamRole: description.iamRole ?: deployDefaults.iamRole,
         keyPair: description.keyPair ?: account?.defaultKeyPair,
+        sequence: description.sequence,
         ignoreSequence: description.ignoreSequence,
         startDisabled: description.startDisabled,
         associatePublicIpAddress: description.associatePublicIpAddress,
@@ -168,7 +242,8 @@ class BasicAmazonDeployHandler implements DeployHandler<BasicAmazonDeployDescrip
         instanceMonitoring: description.instanceMonitoring,
         ebsOptimized: description.ebsOptimized,
         regionScopedProvider: regionScopedProvider,
-        base64UserData: description.base64UserData)
+        base64UserData: description.base64UserData,
+        tags: description.tags)
 
       def asgName = autoScalingWorker.deploy()
 
@@ -220,7 +295,7 @@ class BasicAmazonDeployHandler implements DeployHandler<BasicAmazonDeployDescrip
       sourceAsg.launchConfigurationName
     )
 
-    description.blockDevices = description.blockDevices != null ? description.blockDevices : convertBlockDevices(sourceLaunchConfiguration.blockDeviceMappings)
+    description.blockDevices = buildBlockDeviceMappings(description, sourceLaunchConfiguration)
     description.spotPrice = description.spotPrice ?: sourceLaunchConfiguration.spotPrice
 
     return description
@@ -289,6 +364,45 @@ class BasicAmazonDeployHandler implements DeployHandler<BasicAmazonDeployDescrip
       throw new IllegalArgumentException("Instance type ${instanceType} does not support " +
           "virtualization type ${ami.virtualizationType}. Please select a different image or instance type.")
     }
+  }
 
+  /**
+   * Determine block devices
+   *
+   * If:
+   * - The source launch configuration is using default block device mappings
+   * - The instance type has changed
+   *
+   * Then:
+   * - Re-generate block device mappings based on the new instance type
+   *
+   * Otherwise:
+   * - Continue to use any custom block device mappings (if set)
+   */
+  private static Collection<AmazonBlockDevice> buildBlockDeviceMappings(
+    BasicAmazonDeployDescription description,
+    LaunchConfiguration sourceLaunchConfiguration
+  ) {
+    if (description.blockDevices != null) {
+      // block device mappings have been explicitly specified and should be used regardless of instance type
+      return description.blockDevices
+    }
+
+    if (sourceLaunchConfiguration.instanceType != description.instanceType) {
+      // instance type has changed, verify that the block device mappings are still legitimate (ebs vs. ephemeral)
+      def blockDevicesForSourceAsg = sourceLaunchConfiguration.blockDeviceMappings.collect {
+        [deviceName: it.deviceName, virtualName: it.virtualName, size: it.ebs?.volumeSize]
+      }.sort { it.deviceName }
+      def blockDevicesForSourceInstanceType = BlockDeviceConfig.blockDevicesByInstanceType[sourceLaunchConfiguration.instanceType].collect {
+        [deviceName: it.deviceName, virtualName: it.virtualName, size: it.size]
+      }.sort { it.deviceName }
+
+      if (blockDevicesForSourceAsg == blockDevicesForSourceInstanceType) {
+        // use default block mappings for the new instance type (since default block mappings were used on the previous instance type)
+        return BlockDeviceConfig.blockDevicesByInstanceType[description.instanceType]
+      }
+    }
+
+    return convertBlockDevices(sourceLaunchConfiguration.blockDeviceMappings)
   }
 }

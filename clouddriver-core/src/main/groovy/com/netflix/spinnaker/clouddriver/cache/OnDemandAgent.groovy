@@ -25,7 +25,25 @@ interface OnDemandAgent {
 
   String getOnDemandAgentType()
 
+  // TODO(ttomsu): This seems like it should go in a different interface.
   OnDemandMetricsSupport getMetricsSupport()
+
+  enum OnDemandType {
+    ServerGroup,
+    SecurityGroup,
+    LoadBalancer,
+    Job,
+
+    static OnDemandType fromString(String s) {
+      OnDemandType t = values().find { it.toString().equalsIgnoreCase(s) }
+      if (!t) {
+        throw new IllegalArgumentException("Cannot create OnDemandType from String '${s}'")
+      }
+      return t
+    }
+  }
+
+  boolean handles(OnDemandType type, String cloudProvider)
 
   static class OnDemandResult {
     String sourceAgentType
@@ -34,10 +52,7 @@ interface OnDemandAgent {
     Map<String, Collection<String>> evictions = [:]
   }
 
-  @Deprecated
-  boolean handles(String type)
-
-  boolean handles(String type, String cloudProvider)
-
   OnDemandResult handle(ProviderCache providerCache, Map<String, ? extends Object> data)
+
+  Collection<Map> pendingOnDemandRequests(ProviderCache providerCache)
 }

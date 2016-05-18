@@ -19,6 +19,7 @@ package com.netflix.spinnaker.clouddriver.aws.deploy.ops
 import com.amazonaws.services.autoscaling.model.DisableMetricsCollectionRequest
 import com.amazonaws.services.autoscaling.model.UpdateAutoScalingGroupRequest
 import com.netflix.frigga.Names
+import com.netflix.spinnaker.clouddriver.aws.AwsConfiguration
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
@@ -38,6 +39,9 @@ class ModifyAsgLaunchConfigurationOperation implements AtomicOperation<Void> {
   @Autowired
   RegionScopedProviderFactory regionScopedProviderFactory
 
+  @Autowired
+  AwsConfiguration.DeployDefaults deployDefaults
+
   private final ModifyAsgLaunchConfigurationDescription description
 
   ModifyAsgLaunchConfigurationOperation(ModifyAsgLaunchConfigurationDescription description) {
@@ -55,34 +59,29 @@ class ModifyAsgLaunchConfigurationOperation implements AtomicOperation<Void> {
 
     def settings = lcBuilder.buildSettingsFromLaunchConfiguration(description.credentials, description.region, existingLc)
 
-    def props = [:] + description.properties
-    def settingsKeys = settings.properties.keySet()
-    props.remove('class')
-    props = props.findResults { k, v -> (v != null && settingsKeys.contains(k)) ? [k, v] : null}.collectEntries()
-
-    if (description.amiName) {
-      // find by 1) result of a previous step (we performed allow launch)
-      //         2) explicitly granted launch permission
-      //            (making this the default because AllowLaunch will always
-      //             stick an explicit launch permission on the image)
-      //         3) owner
-      //         4) global
-      def amazonEC2 = regionScopedProvider.amazonEC2
-      ResolvedAmiResult ami = priorOutputs.find({
-        it instanceof ResolvedAmiResult && it.region == description.region && it.amiName == description.amiName
-      }) ?:
-        AmiIdResolver.resolveAmiId(amazonEC2, description.region, description.amiName, null, description.credentials.accountId) ?:
-          AmiIdResolver.resolveAmiId(amazonEC2, description.region, description.amiName, description.credentials.accountId) ?:
-            AmiIdResolver.resolveAmiId(amazonEC2, description.region, description.amiName, null, null)
-
-      props.ami = ami.amiId
-    }
-
-    if (!asg.getVPCZoneIdentifier()) {
+    def props = [:]
+    if (!asg.getVPCZoneIdentifier() && !settings.classicLinkVpcId) {
       def classicLinkVpc = regionScopedProvider.amazonEC2.describeVpcClassicLink().vpcs.find { it.classicLinkEnabled }
       if (classicLinkVpc) {
         props.classicLinkVpcId = classicLinkVpc.vpcId
+        if (deployDefaults.classicLinkSecurityGroupName) {
+          props.classicLinkVpcSecurityGroups = [ deployDefaults.classicLinkSecurityGroupName ]
+        }
       }
+    }
+
+    def settingsKeys = settings.properties.keySet()
+    props = props + description.properties.findResults { k, v -> (v != null && settingsKeys.contains(k)) ? [k, v] : null }.collectEntries()
+    props.remove('class')
+
+
+    if (description.amiName) {
+      def amazonEC2 = regionScopedProvider.amazonEC2
+      ResolvedAmiResult ami = priorOutputs.find({
+        it instanceof ResolvedAmiResult && it.region == description.region && it.amiName == description.amiName
+      }) ?: AmiIdResolver.resolveAmiIdFromAllSources(amazonEC2, description.region, description.amiName, description.credentials.accountId)
+
+      props.ami = ami.amiId
     }
 
     def newSettings = settings.copyWith(props)

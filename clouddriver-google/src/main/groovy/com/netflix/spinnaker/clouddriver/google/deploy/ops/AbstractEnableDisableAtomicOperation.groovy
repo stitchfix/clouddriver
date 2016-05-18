@@ -25,7 +25,9 @@ import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
 import com.netflix.spinnaker.clouddriver.google.deploy.description.EnableDisableGoogleServerGroupDescription
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
+import org.springframework.beans.factory.annotation.Autowired
 
 abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<Void> {
   abstract boolean isDisable()
@@ -33,6 +35,9 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
   abstract String getPhaseName()
 
   EnableDisableGoogleServerGroupDescription description
+
+  @Autowired
+  GoogleClusterProvider googleClusterProvider
 
   AbstractEnableDisableAtomicOperation(EnableDisableGoogleServerGroupDescription description) {
     this.description = description
@@ -44,14 +49,16 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
     String presentParticipling = disable ? 'Disabling' : 'Enabling'
 
     task.updateStatus phaseName, "Initializing $verb server group operation for $description.serverGroupName in " +
-      "$description.zone..."
+      "$description.region..."
 
+    def accountName = description.accountName
     def credentials = description.credentials
     def compute = credentials.compute
     def project = credentials.project
-    def zone = description.zone
-    def region = GCEUtil.getRegionFromZone(project, zone, compute)
+    def region = description.region
     def serverGroupName = description.serverGroupName
+    def serverGroup = GCEUtil.queryServerGroup(googleClusterProvider, accountName, region, serverGroupName)
+    def zone = serverGroup.zone
     def managedInstanceGroup = GCEUtil.queryManagedInstanceGroup(project, zone, serverGroupName, credentials);
     def currentTargetPoolUrls = managedInstanceGroup.getTargetPools()
     def newTargetPoolUrls = []
@@ -66,14 +73,8 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
 
         def targetPool = compute.targetPools().get(project, region, targetPoolLocalName).execute()
         def instanceUrls = targetPool.getInstances()
-        def instanceReferencesToRemove = []
-
-        instanceUrls.each { instanceUrl ->
-          def instanceLocalName = GCEUtil.getLocalName(instanceUrl)
-
-          if (instanceLocalName.startsWith("$serverGroupName-")) {
-            instanceReferencesToRemove << new InstanceReference(instance: instanceUrl)
-          }
+        def instanceReferencesToRemove = instanceUrls.findResults { instanceUrl ->
+          GCEUtil.getLocalName(instanceUrl).startsWith("$serverGroupName-") ? new InstanceReference(instance: instanceUrl) : null
         }
 
         if (instanceReferencesToRemove) {
@@ -93,10 +94,8 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
                                                                   serverGroupName,
                                                                   new InstanceGroupsListInstancesRequest()).execute().items
 
-      def instanceReferencesToAdd = []
-
-      groupInstances.each { groupInstance ->
-        instanceReferencesToAdd << new InstanceReference(instance: groupInstance.instance)
+      def instanceReferencesToAdd = groupInstances.collect { groupInstance ->
+        new InstanceReference(instance: groupInstance.instance)
       }
 
       def instanceTemplateUrl = managedInstanceGroup.getInstanceTemplate()
@@ -133,7 +132,7 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
       }
     }
 
-    task.updateStatus phaseName, "$presentParticipling server group $description.serverGroupName in $zone..."
+    task.updateStatus phaseName, "$presentParticipling server group $description.serverGroupName in $region..."
 
     def instanceGroupManagersSetTargetPoolsRequest =
             new InstanceGroupManagersSetTargetPoolsRequest(targetPools: newTargetPoolUrls)
@@ -145,7 +144,7 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
                                                    serverGroupName,
                                                    instanceGroupManagersSetTargetPoolsRequest).execute()
 
-    task.updateStatus phaseName, "Done ${presentParticipling.toLowerCase()} server group $description.serverGroupName in $zone."
+    task.updateStatus phaseName, "Done ${presentParticipling.toLowerCase()} server group $description.serverGroupName in $region."
     null
   }
 

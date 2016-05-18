@@ -16,10 +16,15 @@
 
 package com.netflix.spinnaker.clouddriver.kubernetes.deploy.validators
 
+import com.netflix.spinnaker.clouddriver.docker.registry.security.DockerRegistryNamedAccountCredentials
+import com.netflix.spinnaker.clouddriver.kubernetes.api.KubernetesApiAdaptor
+import com.netflix.spinnaker.clouddriver.kubernetes.config.LinkedDockerRegistryConfiguration
 import com.netflix.spinnaker.clouddriver.kubernetes.security.KubernetesCredentials
 import com.netflix.spinnaker.clouddriver.kubernetes.security.KubernetesNamedAccountCredentials
+import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
 import com.netflix.spinnaker.clouddriver.security.DefaultAccountCredentialsProvider
 import com.netflix.spinnaker.clouddriver.security.MapBackedAccountCredentialsRepository
+import io.fabric8.kubernetes.api.model.Secret
 import org.springframework.validation.Errors
 import spock.lang.Shared
 import spock.lang.Specification
@@ -28,6 +33,13 @@ import spock.lang.Unroll
 class StandardKubernetesAttributeValidatorSpec extends Specification {
   private static final ACCOUNT_NAME = "auto"
   private static final DECORATOR = "decorator"
+  private static final List<String> NAMESPACES = ["default", "prod"]
+  private static final List<LinkedDockerRegistryConfiguration> DOCKER_REGISTRY_ACCOUNTS = [
+    new LinkedDockerRegistryConfiguration(accountName: "my-docker-account"),
+    new LinkedDockerRegistryConfiguration(accountName: "restricted-docker-account", namespaces: ["prod"])]
+
+  @Shared
+  KubernetesCredentials credentials
 
   @Shared
   DefaultAccountCredentialsProvider accountCredentialsProvider
@@ -37,7 +49,21 @@ class StandardKubernetesAttributeValidatorSpec extends Specification {
     accountCredentialsProvider = new DefaultAccountCredentialsProvider(credentialsRepo)
     def namedAccountCredentialsMock = Mock(KubernetesNamedAccountCredentials)
     namedAccountCredentialsMock.getName() >> ACCOUNT_NAME
-    namedAccountCredentialsMock.getCredentials() >> new KubernetesCredentials(null, null)
+    def apiMock = Mock(KubernetesApiAdaptor)
+    def accountCredentialsRepositoryMock = Mock(AccountCredentialsRepository)
+
+    DOCKER_REGISTRY_ACCOUNTS.forEach({ account ->
+      def dockerRegistryAccountMock = Mock(DockerRegistryNamedAccountCredentials)
+      accountCredentialsRepositoryMock.getOne(account.accountName) >> dockerRegistryAccountMock
+      dockerRegistryAccountMock.getAccountName() >> account
+      NAMESPACES.forEach({ namespace ->
+        apiMock.getSecret(namespace, account.accountName) >> null
+        apiMock.createSecret(namespace, _) >> null
+      })
+    })
+
+    credentials = new KubernetesCredentials(apiMock, NAMESPACES, DOCKER_REGISTRY_ACCOUNTS, accountCredentialsRepositoryMock)
+    namedAccountCredentialsMock.getCredentials() >> credentials
     credentialsRepo.save(ACCOUNT_NAME, namedAccountCredentialsMock)
   }
 
@@ -186,13 +212,13 @@ class StandardKubernetesAttributeValidatorSpec extends Specification {
     when:
       validator.validateCredentials(null, accountCredentialsProvider)
     then:
-      1 * errorsMock.rejectValue("${DECORATOR}.credentials", "${DECORATOR}.credentials.empty")
+      1 * errorsMock.rejectValue("${DECORATOR}.account", "${DECORATOR}.account.empty")
       0 * errorsMock._
 
     when:
       validator.validateCredentials("", accountCredentialsProvider)
     then:
-      1 * errorsMock.rejectValue("${DECORATOR}.credentials", "${DECORATOR}.credentials.empty")
+      1 * errorsMock.rejectValue("${DECORATOR}.account", "${DECORATOR}.account.empty")
       0 * errorsMock._
   }
 
@@ -204,7 +230,7 @@ class StandardKubernetesAttributeValidatorSpec extends Specification {
     when:
       validator.validateCredentials("You-don't-know-me", accountCredentialsProvider)
     then:
-      1 * errorsMock.rejectValue("${DECORATOR}.credentials", "${DECORATOR}.credentials.notFound")
+      1 * errorsMock.rejectValue("${DECORATOR}.account", "${DECORATOR}.account.notFound")
       0 * errorsMock._
   }
 
@@ -416,12 +442,6 @@ class StandardKubernetesAttributeValidatorSpec extends Specification {
     then:
       1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must match ${StandardKubernetesAttributeValidator.prefixPattern})")
       0 * errorsMock._
-
-    when:
-      validator.validateStack("", label)
-    then:
-      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.empty")
-      0 * errorsMock._
   }
 
   void "memory accept"() {
@@ -525,17 +545,17 @@ class StandardKubernetesAttributeValidatorSpec extends Specification {
       def label = "label"
 
     when:
-      validator.validateNamespace("", label)
+      validator.validateNamespace(credentials, "", label)
     then:
       0 * errorsMock._
 
     when:
-      validator.validateNamespace("default", label)
+      validator.validateNamespace(credentials, NAMESPACES[0], label)
     then:
       0 * errorsMock._
 
     when:
-      validator.validateNamespace("prod-staging", label)
+      validator.validateNamespace(credentials, NAMESPACES[1], label)
     then:
       0 * errorsMock._
   }
@@ -547,21 +567,182 @@ class StandardKubernetesAttributeValidatorSpec extends Specification {
       def label = "label"
 
     when:
-      validator.validateNamespace(" .-100z", label)
+      validator.validateNamespace(credentials, " .-100z", label)
     then:
-      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must match ${StandardKubernetesAttributeValidator.namePattern})")
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.notRegistered")
       0 * errorsMock._
 
     when:
-      validator.validateNamespace("?", label)
+      validator.validateNamespace(credentials, "?", label)
     then:
-      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must match ${StandardKubernetesAttributeValidator.namePattern})")
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.notRegistered")
       0 * errorsMock._
 
     when:
-      validator.validateNamespace("- ", label)
+      validator.validateNamespace(credentials, "- ", label)
     then:
-      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must match ${StandardKubernetesAttributeValidator.namePattern})")
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.notRegistered")
+      0 * errorsMock._
+  }
+
+  void "image pull secret accept"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validateImagePullSecret(credentials, DOCKER_REGISTRY_ACCOUNTS[0].accountName, NAMESPACES[0], label)
+    then:
+      0 * errorsMock._
+
+    when:
+      validator.validateImagePullSecret(credentials, DOCKER_REGISTRY_ACCOUNTS[1].accountName, NAMESPACES[1], label)
+    then:
+      0 * errorsMock._
+  }
+
+  void "image pull secret reject"() {
+    setup:
+    def errorsMock = Mock(Errors)
+    def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+    def label = "label"
+
+    when:
+      validator.validateImagePullSecret(credentials, DOCKER_REGISTRY_ACCOUNTS[1].accountName, NAMESPACES[0], label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.notRegistered")
+      0 * errorsMock._
+
+    when:
+      validator.validateImagePullSecret(credentials, "?", NAMESPACES[0], label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.notRegistered")
+      0 * errorsMock._
+
+    when:
+      validator.validateImagePullSecret(credentials, DOCKER_REGISTRY_ACCOUNTS[0].accountName, "not a namespace", label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.notRegistered")
+      0 * errorsMock._
+  }
+
+  void "port accept"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validatePort(80, label)
+    then:
+      0 * errorsMock._
+
+    when:
+      validator.validatePort(111, label)
+    then:
+      0 * errorsMock._
+
+    when:
+      validator.validatePort(65535, label)
+    then:
+      0 * errorsMock._
+  }
+
+  void "port reject"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validatePort(0, label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must be in range [1, $StandardKubernetesAttributeValidator.maxPort])")
+      0 * errorsMock._
+
+    when:
+      validator.validatePort(-1, label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must be in range [1, $StandardKubernetesAttributeValidator.maxPort])")
+      0 * errorsMock._
+
+    when:
+      validator.validatePort(65536, label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must be in range [1, $StandardKubernetesAttributeValidator.maxPort])")
+      0 * errorsMock._
+  }
+
+  void "protocol accept"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validateProtocol('TCP', label)
+    then:
+      0 * errorsMock._
+
+    when:
+      validator.validateProtocol('UDP', label)
+    then:
+      0 * errorsMock._
+  }
+
+  void "protocol reject"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validateProtocol('', label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.empty")
+      0 * errorsMock._
+
+    when:
+      validator.validateProtocol('UPD', label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must be one of $StandardKubernetesAttributeValidator.protocolList)")
+      0 * errorsMock._
+  }
+
+  void "path accept"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validatePath('/', label)
+    then:
+      0 * errorsMock._
+
+    when:
+      validator.validatePath('/path-to/dir12\\ 3/4', label)
+    then:
+      0 * errorsMock._
+  }
+
+  void "path reject"() {
+    setup:
+      def errorsMock = Mock(Errors)
+      def validator = new StandardKubernetesAttributeValidator(DECORATOR, errorsMock)
+      def label = "label"
+
+    when:
+      validator.validatePath('', label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.empty")
+      0 * errorsMock._
+
+    when:
+      validator.validatePath('path-to/dir12\\ 3/4', label)
+    then:
+      1 * errorsMock.rejectValue("${DECORATOR}.${label}", "${DECORATOR}.${label}.invalid (Must match ${StandardKubernetesAttributeValidator.pathPattern})")
       0 * errorsMock._
   }
 }

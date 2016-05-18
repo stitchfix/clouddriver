@@ -16,6 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.aws.deploy.validators
 
+import com.netflix.spinnaker.clouddriver.aws.deploy.description.AdjustmentType
 import com.netflix.spinnaker.clouddriver.aws.deploy.description.UpsertScalingPolicyDescription
 import org.springframework.stereotype.Component
 import org.springframework.validation.Errors
@@ -26,28 +27,20 @@ class UpsertScalingPolicyDescriptionValidator extends AmazonDescriptionValidatio
   void validate(List priorDescriptions, UpsertScalingPolicyDescription description, Errors errors) {
     validateRegions(description, [description.region], "upsertScalingPolicyDescription", errors)
 
-    if (!description.asgName) {
-      rejectNull "asgName", errors
+    if (!description.serverGroupName && !description.asgName) {
+      rejectNull "serverGroupName", errors
     }
 
-    if (!description.name) {
-      rejectNull "name", errors
+    if (description.minAdjustmentMagnitude && !(description.adjustmentType == AdjustmentType.PercentChangeInCapacity)) {
+      errors.rejectValue("minAdjustmentMagnitude", "upsertScalingPolicyDescription.minAdjustmentMagnitude.requires.adjustmentType.percentChangeInCapacity")
     }
 
-    if (!description.metric?.namespace) {
-      rejectNull "metric.namespace", errors
+    if (description.simple && description.step) {
+      errors.rejectValue("step", "upsertScalingPolicyDescription.stepPolicy.cannot.have.simplePolicy.attributes")
     }
 
-    if (!description.metric?.name) {
-      rejectNull "metric.name", errors
-    }
-
-    if (!description.threshold) {
-      rejectNull "threshold", errors
-    }
-
-    if (!description.scaleAmount) {
-      rejectNull "scaleAmount", errors
+    if (!description.simple && !description.step) {
+      errors.rejectValue("step", "upsertScalingPolicyDescription.must.be.simplePolicy.or.stepPolicy")
     }
 
   }

@@ -35,16 +35,8 @@ class CatsSearchProvider implements SearchProvider {
   private final List<SearchableProvider> providers
   private final List<String> defaultCaches
   private final Map<String, SearchableProvider.SearchResultHydrator> searchResultHydrators
-  private final Map<String, SearchableProvider.IdentifierExtractor> identifierExtractors
 
   private final Map<String, Template> urlMappings
-
-  private static class DefaultQueryIdentifierExtractor implements SearchableProvider.IdentifierExtractor {
-    @Override
-    Collection<String> getIdentifiers(Cache cacheView, String type, String query) {
-      return cacheView.filterIdentifiers(type, "*:${type}:*${query}*")
-    }
-  }
 
   @Autowired
   public CatsSearchProvider(Cache cacheView, List<SearchableProvider> providers) {
@@ -59,11 +51,6 @@ class CatsSearchProvider implements SearchProvider {
     urlMappings = providers.inject([:]) { Map mappings, SearchableProvider provider ->
       mappings.putAll(provider.urlMappingTemplates.collectEntries { [(it.key): tmpl.createTemplate(it.value)] })
       return mappings
-    }
-    SearchableProvider.IdentifierExtractor defaultExtractor = new DefaultQueryIdentifierExtractor()
-    identifierExtractors = providers.inject([:].withDefault { defaultExtractor }) { Map acc, SearchableProvider prov ->
-      acc.putAll(prov.getIdentifierExtractors())
-      return acc
     }
   }
 
@@ -97,7 +84,8 @@ class CatsSearchProvider implements SearchProvider {
   }
 
   private SearchResultSet generateResultSet(String query, List<String> matches, Integer pageNumber, Integer pageSize) {
-    List<Map<String, String>> results = paginateResults(matches, pageSize, pageNumber).findResults { String key ->
+    List<String> resultPage = paginateResults(matches, pageSize, pageNumber)
+    List<Map<String, String>> results = resultPage.findResults { String key ->
       Map<String, String> result = providers.findResult { it.parseKey(key) }
       if (result) {
         return searchResultHydrators.containsKey(result.type) ? searchResultHydrators[result.type].hydrateResult(cacheView, result, key) : result
@@ -105,8 +93,10 @@ class CatsSearchProvider implements SearchProvider {
       return null
     }
 
+    int filteredItems = resultPage.size() - results.size()
+
     SearchResultSet resultSet = new SearchResultSet(
-      totalMatches: matches.size(),
+      totalMatches: matches.size() - filteredItems,
       platform: getPlatform(),
       query: query,
       pageNumber: pageNumber,
@@ -132,7 +122,7 @@ class CatsSearchProvider implements SearchProvider {
     String normalizedWord = q.toLowerCase()
     List<String> matches = new ArrayList<String>()
     toQuery.each { String cache ->
-      matches.addAll(identifierExtractors[cache].getIdentifiers(cacheView, cache, normalizedWord).findAll { String key ->
+      matches.addAll(cacheView.filterIdentifiers(cache, "*:${cache}:*${normalizedWord}*").findAll { String key ->
         try {
           if (!filters) {
             return true

@@ -19,87 +19,47 @@ package com.netflix.spinnaker.clouddriver.google.provider.agent
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.google.api.services.compute.model.Firewall
 import com.netflix.spectator.api.Registry
-import com.netflix.spinnaker.cats.agent.AccountAware
 import com.netflix.spinnaker.cats.agent.AgentDataType
 import com.netflix.spinnaker.cats.agent.CacheResult
-import com.netflix.spinnaker.cats.agent.CachingAgent
-import com.netflix.spinnaker.cats.agent.DefaultCacheResult
-import com.netflix.spinnaker.cats.cache.CacheData
-import com.netflix.spinnaker.cats.cache.DefaultCacheData
 import com.netflix.spinnaker.cats.provider.ProviderCache
 import com.netflix.spinnaker.clouddriver.cache.OnDemandAgent
 import com.netflix.spinnaker.clouddriver.cache.OnDemandMetricsSupport
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
+import com.netflix.spinnaker.clouddriver.google.cache.CacheResultBuilder
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
-import com.netflix.spinnaker.clouddriver.google.provider.GoogleInfrastructureProvider
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import groovy.util.logging.Slf4j
 
 import static com.netflix.spinnaker.cats.agent.AgentDataType.Authority.AUTHORITATIVE
+import static com.netflix.spinnaker.clouddriver.google.cache.Keys.Namespace.SECURITY_GROUPS
 
 @Slf4j
-class GoogleSecurityGroupCachingAgent implements CachingAgent, OnDemandAgent, AccountAware {
+class GoogleSecurityGroupCachingAgent extends AbstractGoogleCachingAgent implements OnDemandAgent {
 
-  @Deprecated
-  private static final String LEGACY_ON_DEMAND_TYPE = 'GoogleSecurityGroup'
+  final Set<AgentDataType> providedDataTypes = [
+      AUTHORITATIVE.forType(SECURITY_GROUPS.ns)
+  ] as Set
 
-  private static final String ON_DEMAND_TYPE = 'SecurityGroup'
-
-  final GoogleCloudProvider googleCloudProvider
-  final String accountName
-  final GoogleCredentials credentials
-  final ObjectMapper objectMapper
-
+  String agentType = "${accountName}/global/${GoogleSecurityGroupCachingAgent.simpleName}"
+  String onDemandAgentType = "${agentType}-OnDemand"
   final OnDemandMetricsSupport metricsSupport
 
-  static final Set<AgentDataType> types = Collections.unmodifiableSet([
-    AUTHORITATIVE.forType(Keys.Namespace.SECURITY_GROUPS.ns)
-  ] as Set)
-
-  GoogleSecurityGroupCachingAgent(GoogleCloudProvider googleCloudProvider,
-                                  String accountName,
-                                  GoogleCredentials credentials,
+  GoogleSecurityGroupCachingAgent(String googleApplicationName,
+                                  GoogleNamedAccountCredentials credentials,
                                   ObjectMapper objectMapper,
                                   Registry registry) {
-    this.googleCloudProvider = googleCloudProvider
-    this.accountName = accountName
-    this.credentials = credentials
-    this.objectMapper = objectMapper
-    this.metricsSupport = new OnDemandMetricsSupport(registry, this, googleCloudProvider.id + ":" + ON_DEMAND_TYPE)
-  }
-
-  @Override
-  String getProviderName() {
-    GoogleInfrastructureProvider.PROVIDER_NAME
-  }
-
-  @Override
-  String getAgentType() {
-    "${accountName}/global/${GoogleSecurityGroupCachingAgent.simpleName}"
-  }
-
-  @Override
-  String getAccountName() {
-    accountName
-  }
-
-  @Override
-  Collection<AgentDataType> getProvidedDataTypes() {
-    return types
-  }
-
-  @Override
-  String getOnDemandAgentType() {
-    getAgentType()
+    super(googleApplicationName,
+          credentials,
+          objectMapper)
+    this.metricsSupport = new OnDemandMetricsSupport(
+        registry,
+        this,
+        "${GoogleCloudProvider.GCE}:${OnDemandAgent.OnDemandType.SecurityGroup}")
   }
 
   @Override
   OnDemandAgent.OnDemandResult handle(ProviderCache providerCache, Map<String, ? extends Object> data) {
-    if (data.account != accountName) {
-      return null
-    }
-
-    if (data.region != "global") {
+    if (data.account != accountName || data.region != "global") {
       return null
     }
 
@@ -112,49 +72,50 @@ class GoogleSecurityGroupCachingAgent implements CachingAgent, OnDemandAgent, Ac
     }
 
     new OnDemandAgent.OnDemandResult(
-      sourceAgentType: getAgentType(),
-      authoritativeTypes: [Keys.Namespace.SECURITY_GROUPS.ns],
-      cacheResult: result
+        sourceAgentType: getAgentType(),
+        authoritativeTypes: [SECURITY_GROUPS.ns],
+        cacheResult: result
     )
   }
 
   @Override
-  boolean handles(String type) {
-    type == LEGACY_ON_DEMAND_TYPE
+  Collection<Map> pendingOnDemandRequests(ProviderCache providerCache) {
+    return []
   }
 
   @Override
-  boolean handles(String type, String cloudProvider) {
-    type == ON_DEMAND_TYPE && cloudProvider == googleCloudProvider.id
+  boolean handles(OnDemandAgent.OnDemandType type, String cloudProvider) {
+    type == OnDemandAgent.OnDemandType.SecurityGroup && cloudProvider == GoogleCloudProvider.GCE
   }
 
   @Override
   CacheResult loadData(ProviderCache providerCache) {
     List<Firewall> firewallList = loadFirewalls()
-
     buildCacheResult(providerCache, firewallList)
   }
 
   List<Firewall> loadFirewalls() {
-    def compute = credentials.compute
-    def project = credentials.project
-
-    compute.firewalls().list(project).execute().items
+    compute.firewalls().list(project).execute().items as List<Firewall>
   }
 
   private CacheResult buildCacheResult(ProviderCache providerCache, List<Firewall> firewallList) {
     log.info("Describing items in ${agentType}")
 
-    List<CacheData> data = firewallList.collect { Firewall firewall ->
-      Map<String, Object> attributes = [firewall: firewall]
+    CacheResultBuilder cacheResultBuilder = new CacheResultBuilder()
 
-      new DefaultCacheData(Keys.getSecurityGroupKey(googleCloudProvider, firewall.getName(), firewall.getName(), "global", accountName),
-                           attributes,
-                           [:])
+    firewallList.collect { Firewall firewall ->
+      def securityGroupKey = Keys.getSecurityGroupKey(firewall.getName(),
+                                                      firewall.getName(),
+                                                      "global",
+                                                      accountName)
+
+      cacheResultBuilder.namespace(SECURITY_GROUPS.ns).keep(securityGroupKey).with {
+        attributes = [firewall: firewall]
+      }
     }
 
-    log.info("Caching ${data.size()} items in ${agentType}")
+    log.info("Caching ${cacheResultBuilder.namespace(SECURITY_GROUPS.ns).keepSize()} security groups in ${agentType}")
 
-    new DefaultCacheResult([(Keys.Namespace.SECURITY_GROUPS.ns): data])
+    cacheResultBuilder.build()
   }
 }

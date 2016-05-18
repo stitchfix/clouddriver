@@ -5,6 +5,8 @@ server:
 
 redis:
   connection: redis://localhost:6379
+  scheduler: default
+  parallelism: -1
 
 services:
   front50:
@@ -33,6 +35,9 @@ swagger:
     - .*kubernetes.*
     - .*instances.*
     - .*reports.*
+    - .*docker.*
+    - .*job.*
+    - .*process.*
 
 default:
   # legacyServerPort is a non-ssl listener, if ssl is enabled. -1 to disable
@@ -42,6 +47,14 @@ default:
 
 aws:
   enabled: ${AWS_ENABLED:false}
+  # proxy:
+  #  proxyHost: 10.0.0.54
+  #  proxyPort: 8888
+  #  proxyUsername: foo
+  #  proxyPassword: foo
+  #  proxyDomain: foo
+  #  proxyWorkstation: foo
+  #  protocol: HTTP
   defaults:
     iamRole: FooRole
     instanceClassBlockDevices:
@@ -64,15 +77,62 @@ azure:
   defaults:
 
   accounts:
-    - name: default
+    - name: my-azure-account
       clientId: ${AZURE_CLIENT_ID}
       appKey: ${AZURE_APPKEY}
       tenantId: ${AZURE_TENANT_ID}
       subscriptionId: ${AZURE_SUBSCRIPTION_ID}
       regions: ["westus", "eastus"]
+      vmImages:
+      - publisher: "MicrosoftWindowsServer"
+        offer: "WindowsServer"
+        sku: "2012-R2-Datacenter"
+        version: "4.0.20151214"
+      - publisher: "Canonical"
+        offer: "UbuntuServer"
+        sku: "14.04.3-LTS"
+        version: "14.04.201602171"
+      - publisher: "credativ"
+        offer: "Debian"
+        sku: "8"
+        version: "8.0.201602010"
+      - publisher: "OpenLogic"
+        offer: "CentOS"
+        sku: "7.1"
+        version: "7.1.20150731"
+      - publisher: "SUSE"
+        offer: "openSUSE-Leap"
+        sku: "42.1"
+        version: "2016.01.14"
+      - publisher: "SUSE"
+        offer: "SLES"
+        sku: "12-SP1"
+        version: "2015.12.15"
+  # Example how to set the Azure storage connection string related entries for retrieving the list of available custom VM images,
+  #  where "scs" represents the Azure Storage connection string and "blobDir" is the relative path to the custom images container
+  #
+  #    customImages:
+  #    - scs: ${AZURE_SCS1}
+  #      blobDir: "system/Microsoft.Compute/Images/vhds"
+  #      osType: "Windows"
+  #      region: "westus"
+  #    - scs: ${AZURE_SCS2}
+  #      blobDir: "vhds"
+  #      osType: "Linux"
+  #      region: "westus"
 
 google:
   enabled: false
+  baseImageProjects:
+  - centos-cloud
+  - coreos-cloud
+  - debian-cloud
+  - google-containers
+  - opensuse-cloud
+  - rhel-cloud
+  - suse-cloud
+  - ubuntu-os-cloud
+  - windows-cloud
   defaults:
     instanceTypeDisks:
     - instanceType: n1-standard-1
@@ -195,11 +255,11 @@ google:
 kubernetes:
   enabled: false
 
-docker:
-  enabled: ${DOCKER_ENABLED:false}
+dockerRegistry:
+  enabled: ${DOCKER_REGISTRY_ENABLED:false}
 
-titan:
-  enabled: ${TITAN_ENABLED:false}
+titus:
+  enabled: ${TITUS_ENABLED:false}
 
 cf:
   enabled: ${providers.cf.enabled:false}
@@ -211,6 +271,13 @@ cf:
       space: ${providers.cf.defaultSpace}
       username: ${cf.account.name}
       password: ${cf.account.password}
+
+spring:
+  jackson:
+    mapper:
+      SORT_PROPERTIES_ALPHABETICALLY: true
+    serialization:
+      ORDER_MAP_ENTRIES_BY_KEYS: true
 
 ---
 

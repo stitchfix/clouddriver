@@ -19,6 +19,7 @@ package com.netflix.spinnaker.clouddriver.cache
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.cats.agent.Agent
 import com.netflix.spinnaker.cats.agent.AgentExecution
+import com.netflix.spinnaker.cats.agent.AgentLock
 import com.netflix.spinnaker.cats.agent.AgentScheduler
 import com.netflix.spinnaker.cats.agent.CachingAgent
 import com.netflix.spinnaker.cats.agent.DefaultAgentScheduler
@@ -93,11 +94,6 @@ class CacheConfig {
 
       @Override
       Map<String, SearchableProvider.SearchResultHydrator> getSearchResultHydrators() {
-        Collections.emptyMap()
-      }
-
-      @Override
-      Map<String, SearchableProvider.IdentifierExtractor> getIdentifierExtractors() {
         Collections.emptyMap()
       }
 

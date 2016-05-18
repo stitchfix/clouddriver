@@ -16,6 +16,8 @@
 
 package com.netflix.spinnaker.clouddriver.core
 
+import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
+import com.netflix.spinnaker.clouddriver.data.task.jedis.JedisTaskRepository
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.actuate.health.Health
@@ -38,9 +40,18 @@ class RedisConfig {
   }
 
   @Bean
+  TaskRepository taskRepository(JedisPool jedisPool, Optional<JedisPool> jedisPoolPrevious) {
+    new JedisTaskRepository(jedisPool, jedisPoolPrevious)
+  }
+
+  @Bean
   JedisPool jedisPool(@Value('${redis.connection:redis://localhost:6379}') String connection,
                       @Value('${redis.timeout:2000}') int timeout,
                       GenericObjectPoolConfig redisPoolConfig) {
+    return createPool(redisPoolConfig, connection, timeout)
+  }
+
+  private static JedisPool createPool(GenericObjectPoolConfig redisPoolConfig, String connection, int timeout) {
     URI redisConnection = URI.create(connection)
 
     String host = redisConnection.host
@@ -50,7 +61,16 @@ class RedisConfig {
 
     String password = redisConnection.userInfo ? redisConnection.userInfo.split(':', 2)[1] : null
 
-    new JedisPool(redisPoolConfig, host, port, timeout, password, database, null)
+    new JedisPool(redisPoolConfig ?: new GenericObjectPoolConfig(), host, port, timeout, password, database, null)
+  }
+
+  @Bean
+  JedisPool jedisPoolPrevious(@Value('${redis.connection:redis://localhost:6379}') String mainConnection,
+                              @Value('${redis.connection.previous:#{null}}') String connection) {
+    if (mainConnection == connection || connection == null) {
+      return null
+    }
+    return createPool(null, connection, 1000)
   }
 
   @Bean

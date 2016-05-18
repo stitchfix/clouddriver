@@ -16,12 +16,13 @@
 
 package com.netflix.spinnaker.clouddriver.aws.deploy.ops
 
+import com.amazonaws.services.autoscaling.model.DescribeAutoScalingGroupsRequest
 import com.amazonaws.services.autoscaling.model.UpdateAutoScalingGroupRequest
+import com.netflix.spinnaker.clouddriver.aws.deploy.description.ResizeAsgDescription
 import com.netflix.spinnaker.clouddriver.aws.security.AmazonClientProvider
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
-import com.netflix.spinnaker.clouddriver.aws.deploy.description.ResizeAsgDescription
 import org.springframework.beans.factory.annotation.Autowired
 
 class ResizeAsgAtomicOperation implements AtomicOperation<Void> {
@@ -42,16 +43,11 @@ class ResizeAsgAtomicOperation implements AtomicOperation<Void> {
 
   @Override
   Void operate(List priorOutputs) {
-    String descriptor = description.asgName ?:
-        description.asgs.size() == 1 ? description.asgs[0].toString() :
-        description.asgs.collect { it.toString() }
+    String descriptor = description.asgs.collect { it.toString() }
     task.updateStatus PHASE, "Initializing Resize ASG operation for $descriptor..."
 
-    for (String region : description.regions) {
-      resizeAsg(description.asgName, region, description.capacity)
-    }
     for (asg in description.asgs) {
-      resizeAsg(asg.asgName, asg.region, asg.capacity)
+      resizeAsg(asg.serverGroupName, asg.region, asg.capacity)
     }
     task.updateStatus PHASE, "Finished Resize ASG operation for $descriptor."
     null
@@ -60,6 +56,14 @@ class ResizeAsgAtomicOperation implements AtomicOperation<Void> {
   private void resizeAsg(String asgName, String region, ResizeAsgDescription.Capacity capacity) {
     task.updateStatus PHASE, "Beginning resize of ${asgName} in ${region} to ${capacity}."
     def autoScaling = amazonClientProvider.getAutoScaling(description.credentials, region, true)
+    def describeAutoScalingGroups = autoScaling.describeAutoScalingGroups(
+      new DescribeAutoScalingGroupsRequest().withAutoScalingGroupNames(asgName)
+    )
+    if (describeAutoScalingGroups.autoScalingGroups.isEmpty() || describeAutoScalingGroups.autoScalingGroups.get(0).status != null) {
+      task.updateStatus PHASE, "Skipping resize of ${asgName} in ${region}, server group does not exist"
+      return
+    }
+
     def request = new UpdateAutoScalingGroupRequest().withAutoScalingGroupName(asgName)
         .withMinSize(capacity.min).withMaxSize(capacity.max)
         .withDesiredCapacity(capacity.desired)

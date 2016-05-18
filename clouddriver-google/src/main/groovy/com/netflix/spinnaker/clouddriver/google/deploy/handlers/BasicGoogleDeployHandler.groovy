@@ -16,6 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy.handlers
 
+import com.google.api.services.compute.model.Autoscaler
 import com.google.api.services.compute.model.InstanceGroupManager
 import com.google.api.services.compute.model.InstanceProperties
 import com.google.api.services.compute.model.InstanceTemplate
@@ -25,6 +26,7 @@ import com.netflix.spinnaker.clouddriver.deploy.DeployDescription
 import com.netflix.spinnaker.clouddriver.deploy.DeployHandler
 import com.netflix.spinnaker.clouddriver.deploy.DeploymentResult
 import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
+import com.netflix.spinnaker.clouddriver.google.config.GoogleConfigurationProperties
 import com.netflix.spinnaker.clouddriver.google.deploy.GCEServerGroupNameResolver
 import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
 import com.netflix.spinnaker.clouddriver.google.deploy.GoogleOperationPoller
@@ -43,6 +45,9 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
   private static final String DEFAULT_NETWORK_NAME = "default"
   private static final String ACCESS_CONFIG_NAME = "External NAT"
   private static final String ACCESS_CONFIG_TYPE = "ONE_TO_ONE_NAT"
+
+  @Autowired
+  private GoogleConfigurationProperties googleConfigurationProperties
 
   @Autowired
   private GoogleConfiguration.DeployDefaults googleDeployDefaults
@@ -66,10 +71,10 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
   }
 
   /**
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20150909a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "freeFormDetails": "something", "image": "ubuntu-1404-trusty-v20150909a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20150909a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "loadBalancers": ["testlb"], "instanceMetadata": { "load-balancer-names": "myapp-testlb" }, "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20150909a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "tags": ["my-tag-1", "my-tag-2"], "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20160509a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "freeFormDetails": "something", "image": "ubuntu-1404-trusty-v20160509a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20160509a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "loadBalancers": ["testlb"], "instanceMetadata": { "load-balancer-names": "myapp-testlb" }, "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "createServerGroup": { "application": "myapp", "stack": "dev", "image": "ubuntu-1404-trusty-v20160509a", "targetSize": 3, "instanceType": "f1-micro", "zone": "us-central1-f", "tags": ["my-tag-1", "my-tag-2"], "credentials": "my-account-name" }} ]' localhost:7002/gce/ops
    *
    * @param description
    * @param priorOutputs
@@ -77,11 +82,12 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
    */
   @Override
   DeploymentResult handle(BasicGoogleDeployDescription description, List priorOutputs) {
+    def accountName = description.accountName
     def credentials = description.credentials
     def compute = credentials.compute
     def project = credentials.project
     def zone = description.zone
-    def region = GCEUtil.getRegionFromZone(project, zone, compute)
+    def region = description.region ?: GCEUtil.getRegionFromZone(project, zone, compute)
 
     def serverGroupNameResolver = new GCEServerGroupNameResolver(project, region, credentials)
     def clusterName = serverGroupNameResolver.combineAppStackDetail(description.application, description.stack, description.freeFormDetails)
@@ -95,11 +101,20 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
 
     task.updateStatus BASE_PHASE, "Produced server group name: $serverGroupName"
 
-    def machineType = GCEUtil.queryMachineType(project, zone, description.instanceType, compute, task, BASE_PHASE)
+    def machineType = GCEUtil.queryMachineType(project, description.instanceType, compute, task, BASE_PHASE)
 
-    def sourceImage = GCEUtil.querySourceImage(project, description, compute, task, BASE_PHASE, googleApplicationName)
+    def sourceImage = GCEUtil.querySourceImage(project,
+                                               description,
+                                               compute,
+                                               task,
+                                               BASE_PHASE,
+                                               googleApplicationName,
+                                               googleConfigurationProperties.baseImageProjects)
 
     def network = GCEUtil.queryNetwork(project, description.network ?: DEFAULT_NETWORK_NAME, compute, task, BASE_PHASE)
+
+    def subnet =
+      description.subnet ? GCEUtil.querySubnet(project, region, description.subnet, compute, task, BASE_PHASE) : null
 
     def networkLoadBalancers = []
 
@@ -111,7 +126,7 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
       networkLoadBalancers = forwardingRules.collect { it.target }
     }
 
-    def securityGroupTags = GCEUtil.querySecurityGroupTags(description.securityGroups, description.accountName,
+    def securityGroupTags = GCEUtil.querySecurityGroupTags(description.securityGroups, accountName,
         googleSecurityGroupProvider, task, BASE_PHASE)
 
     if (securityGroupTags) {
@@ -121,14 +136,14 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
     task.updateStatus BASE_PHASE, "Composing server group $serverGroupName..."
 
     def attachedDisks = GCEUtil.buildAttachedDisks(project,
-                                                   zone,
+                                                   null,
                                                    sourceImage,
                                                    description.disks,
                                                    false,
                                                    description.instanceType,
                                                    googleDeployDefaults)
 
-    def networkInterface = GCEUtil.buildNetworkInterface(network, ACCESS_CONFIG_NAME, ACCESS_CONFIG_TYPE)
+    def networkInterface = GCEUtil.buildNetworkInterface(network, subnet, ACCESS_CONFIG_NAME, ACCESS_CONFIG_TYPE)
 
     def metadata = GCEUtil.buildMetadataFromMap(description.instanceMetadata)
 
@@ -155,14 +170,30 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
     googleOperationPoller.waitForGlobalOperation(compute, project, instanceTemplateCreateOperation.getName(),
         null, task, "instance template " + GCEUtil.getLocalName(instanceTemplateUrl), BASE_PHASE)
 
-    compute.instanceGroupManagers().insert(project,
-                                           zone,
-                                           new InstanceGroupManager()
-                                               .setName(serverGroupName)
-                                               .setBaseInstanceName(serverGroupName)
-                                               .setInstanceTemplate(instanceTemplateUrl)
-                                               .setTargetSize(description.targetSize)
-                                               .setTargetPools(networkLoadBalancers)).execute()
+    if (autoscalerIsSpecified(description)) {
+      GCEUtil.calibrateTargetSizeWithAutoscaler(description)
+    }
+
+    def migCreateOperation = compute.instanceGroupManagers().insert(project,
+                                                                    zone,
+                                                                    new InstanceGroupManager()
+                                                                        .setName(serverGroupName)
+                                                                        .setBaseInstanceName(serverGroupName)
+                                                                        .setInstanceTemplate(instanceTemplateUrl)
+                                                                        .setTargetSize(description.targetSize)
+                                                                        .setTargetPools(networkLoadBalancers)).execute()
+
+    if (autoscalerIsSpecified(description)) {
+      // Before creating the Autoscaler we must wait until the managed instance group is created.
+      googleOperationPoller.waitForZonalOperation(compute, project, zone, migCreateOperation.getName(),
+        null, task, "managed instance group $serverGroupName", BASE_PHASE)
+
+      task.updateStatus BASE_PHASE, "Creating autoscaler for $serverGroupName..."
+
+      Autoscaler autoscaler = GCEUtil.buildAutoscaler(serverGroupName, migCreateOperation, description)
+
+      compute.autoscalers().insert(project, zone, autoscaler).execute()
+    }
 
     task.updateStatus BASE_PHASE, "Done creating server group $serverGroupName in $zone."
 
@@ -170,5 +201,11 @@ class BasicGoogleDeployHandler implements DeployHandler<BasicGoogleDeployDescrip
     deploymentResult.serverGroupNames = ["$region:$serverGroupName".toString()]
     deploymentResult.serverGroupNameByRegion[region] = serverGroupName
     deploymentResult
+  }
+
+  private boolean autoscalerIsSpecified(BasicGoogleDeployDescription description) {
+    return description.autoscalingPolicy?.with {
+      cpuUtilization || loadBalancingUtilization || customMetricUtilizations
+    }
   }
 }

@@ -19,6 +19,7 @@ package com.netflix.spinnaker.clouddriver.azure.resources.loadbalancer.model
 import com.fasterxml.jackson.annotation.JsonAnyGetter
 import com.fasterxml.jackson.annotation.JsonAnySetter
 import com.netflix.spinnaker.clouddriver.model.LoadBalancer
+import com.netflix.spinnaker.clouddriver.model.LoadBalancerServerGroup
 
 class AzureLoadBalancer implements LoadBalancer {
 
@@ -26,7 +27,10 @@ class AzureLoadBalancer implements LoadBalancer {
   String name
   String region
   String vnet
-  Set<Map<String, Object>> serverGroups = new HashSet<>()
+  String subnet
+  String type = AZURE_LOAD_BALANCER_TYPE
+  Set<LoadBalancerServerGroup> serverGroups = new HashSet<>()
+  String cluster
 
   private static final AZURE_LOAD_BALANCER_TYPE = "azure"
 
@@ -56,14 +60,14 @@ class AzureLoadBalancer implements LoadBalancer {
       return false
     }
     AzureLoadBalancer a = (AzureLoadBalancer)o;
-    a.getAccount() == this.getAccount() && a.getName() == this.getName() && a.getType() == this.getType();
+    a.getAccount() == this.getAccount() && a.getName() == this.getName() && a.getType() == this.getType() && a.region == this.region;
 
     // TODO Implement logic to compare server groups and regions(?)
   }
 
   @Override
   int hashCode() {
-    getAccount().hashCode() + getName().hashCode() + getType().hashCode();
+    getAccount().hashCode() + getName().hashCode() + getType().hashCode() + region.hashCode();
     // TODO Implement logic to add hash code for server groups and regions(?)
   }
 }

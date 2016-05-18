@@ -16,12 +16,13 @@
 
 package com.netflix.spinnaker.clouddriver.azure.security
 
-import com.netflix.spinnaker.clouddriver.azure.client.AzureComputeClient
-import com.netflix.spinnaker.clouddriver.azure.client.AzureNetworkClient
-import com.netflix.spinnaker.clouddriver.azure.client.AzureResourceManagerClient
+import com.netflix.spinnaker.clouddriver.azure.resources.vmimage.model.AzureCustomImageStorage
+import com.netflix.spinnaker.clouddriver.azure.resources.vmimage.model.AzureVMImage
 import com.netflix.spinnaker.clouddriver.security.AccountCredentials
 import groovy.transform.CompileStatic
+import groovy.util.logging.Slf4j
 
+@Slf4j
 @CompileStatic
 public class AzureNamedAccountCredentials implements AccountCredentials<AzureCredentials> {
   private static final String CLOUD_PROVIDER = "azure"
@@ -33,6 +34,8 @@ public class AzureNamedAccountCredentials implements AccountCredentials<AzureCre
   private final String clientId
   private final String appKey
   final List<AzureRegion> regions
+  final List<AzureVMImage> vmImages
+  final List<AzureCustomImageStorage> vmCustomImages
   final String applicationName
   final List<String> requiredGroupMembership
   final AzureCredentials credentials
@@ -46,6 +49,8 @@ public class AzureNamedAccountCredentials implements AccountCredentials<AzureCre
                                String tenantId,
                                String subscriptionId,
                                List<String> regions,
+                               List<AzureVMImage> vmImages,
+                               List<AzureCustomImageStorage> vmCustomImages,
                                String applicationName,
                                List<String> requiredGroupMembership = null) {
     this.accountName = accountName
@@ -56,6 +61,8 @@ public class AzureNamedAccountCredentials implements AccountCredentials<AzureCre
     this.tenantId = tenantId
     this.subscriptionId = subscriptionId
     this.regions = buildRegions(regions)
+    this.vmImages = buildPreferredVMImageList(vmImages)
+    this.vmCustomImages = buildCustomImageStorages(vmCustomImages)
     this.applicationName = applicationName
     this.requiredGroupMembership = requiredGroupMembership ?: [] as List<String>
     this.credentials = appKey.isEmpty() ? null : buildCredentials()
@@ -68,32 +75,49 @@ public class AzureNamedAccountCredentials implements AccountCredentials<AzureCre
 
   @Override
   String getName() {
-    return accountName
-  }
-
-  @Override
-  public String getProvider() {
-    return getCloudProvider()
+    accountName
   }
 
   private AzureCredentials buildCredentials() {
-    AzureResourceManagerClient rmClient = new AzureResourceManagerClient(this.subscriptionId)
-    AzureNetworkClient networkClient = new AzureNetworkClient(this.subscriptionId)
-    AzureComputeClient computeClient = new AzureComputeClient(this.subscriptionId)
-
-    return new AzureCredentials(this.tenantId, this.clientId, this.appKey, rmClient, networkClient, computeClient)
+    new AzureCredentials(this.tenantId, this.clientId, this.appKey, this.subscriptionId)
   }
 
-  private List<AzureRegion> buildRegions(List<String> regions) {
-    return regions?.collect {new AzureRegion(it)}
+  private static List<AzureVMImage> buildPreferredVMImageList(List<AzureVMImage> vmImages) {
+    def result = new ArrayList<AzureVMImage>()
+    vmImages?.each { vmImage ->
+      if (vmImage && vmImage.publisher && vmImage.offer && vmImage.sku && vmImage.version) {
+        result += vmImage
+      } else {
+        log.warn("Invalid preferred VM image entry found in the config file")
+      }
+    }
+
+    result
+  }
+
+  private static List<AzureCustomImageStorage> buildCustomImageStorages(List<AzureCustomImageStorage> vmCustomImages) {
+    def result = new ArrayList<AzureCustomImageStorage>()
+    vmCustomImages?.each { vmImage ->
+      if (vmImage && vmImage.scs && vmImage.blobDir && vmImage.osType) {
+        result += vmImage
+      } else {
+        log.warn("Invalid custom image storage entry found in the config file")
+      }
+    }
+
+    result
+  }
+
+  private static List<AzureRegion> buildRegions(List<String> regions) {
+    regions?.collect {new AzureRegion(it)} ?: []
   }
 
   public static class AzureRegion {
-    public final String name;
+    public final String name
 
     public AzureRegion(String name) {
       if (name == null) {
-        throw new NullPointerException("name");
+        throw new IllegalArgumentException("name must be specified.")
       }
       this.name = name
     }
@@ -102,17 +126,17 @@ public class AzureNamedAccountCredentials implements AccountCredentials<AzureCre
 
     @Override
     public boolean equals(Object o) {
-      if (this == o) return true;
-      if (o == null || getClass() != o.getClass()) return false;
+      if (this == o) return true
+      if (o == null || getClass() != o.getClass()) return false
 
-      AzureRegion awsRegion = (AzureRegion) o;
+      AzureRegion awsRegion = (AzureRegion) o
 
-      return name.equals(awsRegion.name)
+      name.equals(awsRegion.name)
     }
 
     @Override
     public int hashCode() {
-      return name.hashCode();
+      name.hashCode()
     }
   }
 

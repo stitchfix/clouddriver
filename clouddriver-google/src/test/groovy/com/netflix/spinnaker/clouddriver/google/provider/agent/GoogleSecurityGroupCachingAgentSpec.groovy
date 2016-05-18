@@ -26,6 +26,7 @@ import com.netflix.spinnaker.cats.provider.ProviderCache
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
 import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import spock.lang.Specification
 import spock.lang.Subject
 
@@ -37,22 +38,30 @@ class GoogleSecurityGroupCachingAgentSpec extends Specification {
 
   void "should add security groups on initial run"() {
     setup:
-      def googleCloudProvider = new GoogleCloudProvider()
       def computeMock = Mock(Compute)
-      def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
+      def credentials = new GoogleNamedAccountCredentials(ACCOUNT_NAME, null, null, null, false, null, null, null, "testApplicationName")
+      credentials.metaClass.credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
       def firewallsMock = Mock(Compute.Firewalls)
       def firewallsListMock = Mock(Compute.Firewalls.List)
       def securityGroupA = new Firewall(name: 'name-a')
       def securityGroupB = new Firewall(name: 'name-b')
-      def keyGroupA = Keys.getSecurityGroupKey(googleCloudProvider, securityGroupA.name, securityGroupA.name, REGION, ACCOUNT_NAME)
-      def keyGroupB = Keys.getSecurityGroupKey(googleCloudProvider, securityGroupB.name, securityGroupB.name, REGION, ACCOUNT_NAME)
+      def keyGroupA = Keys.getSecurityGroupKey(securityGroupA.name as String,
+                                               securityGroupA.name as String,
+                                               REGION,
+                                               ACCOUNT_NAME)
+      def keyGroupB = Keys.getSecurityGroupKey(securityGroupB.name as String,
+                                               securityGroupB.name as String,
+                                               REGION,
+                                               ACCOUNT_NAME)
       def firewallListReal = new FirewallList(items: [
-        securityGroupA,
-        securityGroupB
+          securityGroupA,
+          securityGroupB
       ])
       def ProviderCache providerCache = Mock(ProviderCache)
-      @Subject GoogleSecurityGroupCachingAgent agent = new GoogleSecurityGroupCachingAgent(
-        googleCloudProvider, ACCOUNT_NAME, credentials, new ObjectMapper(), Spectator.registry())
+      @Subject GoogleSecurityGroupCachingAgent agent = new GoogleSecurityGroupCachingAgent("testApplicationName",
+                                                                                           credentials,
+                                                                                           new ObjectMapper(),
+                                                                                           Spectator.registry())
 
     when:
       def cache = agent.loadData(providerCache)
@@ -61,7 +70,7 @@ class GoogleSecurityGroupCachingAgentSpec extends Specification {
       1 * computeMock.firewalls() >> firewallsMock
       1 * firewallsMock.list(PROJECT_NAME) >> firewallsListMock
       1 * firewallsListMock.execute() >> firewallListReal
-      with (cache.cacheResults.get(Keys.Namespace.SECURITY_GROUPS.ns)) { List<CacheData> cd ->
+      with(cache.cacheResults.get(Keys.Namespace.SECURITY_GROUPS.ns)) { Collection<CacheData> cd ->
         cd.size() == 2
         cd.id.containsAll([keyGroupA, keyGroupB])
       }

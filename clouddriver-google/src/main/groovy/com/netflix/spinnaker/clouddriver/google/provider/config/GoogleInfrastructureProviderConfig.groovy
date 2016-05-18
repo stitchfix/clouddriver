@@ -17,37 +17,51 @@
 package com.netflix.spinnaker.clouddriver.google.provider.config
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.cats.agent.Agent
 import com.netflix.spinnaker.cats.provider.ProviderSynchronizerTypeWrapper
-import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
+import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
 import com.netflix.spinnaker.clouddriver.google.provider.GoogleInfrastructureProvider
+import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleImageCachingAgent
+import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleInstanceCachingAgent
+import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleLoadBalancerCachingAgent
 import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleNetworkCachingAgent
 import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleSecurityGroupCachingAgent
+import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleServerGroupCachingAgent
+import com.netflix.spinnaker.clouddriver.google.provider.agent.GoogleSubnetCachingAgent
 import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
 import com.netflix.spinnaker.clouddriver.security.ProviderUtils
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.beans.factory.config.ConfigurableBeanFactory
+import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.DependsOn
+import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Scope
 
 import java.util.concurrent.ConcurrentHashMap
 
 @Configuration
+@Import(GoogleConfiguration)
+@EnableConfigurationProperties
 class GoogleInfrastructureProviderConfig {
+
+  @Autowired
+  GoogleConfiguration googleConfiguration
+
   @Bean
   @DependsOn('googleNamedAccountCredentials')
-  GoogleInfrastructureProvider googleInfrastructureProvider(GoogleCloudProvider googleCloudProvider,
-                                                            AccountCredentialsRepository accountCredentialsRepository,
+  GoogleInfrastructureProvider googleInfrastructureProvider(AccountCredentialsRepository accountCredentialsRepository,
                                                             ObjectMapper objectMapper,
                                                             Registry registry) {
     def googleInfrastructureProvider =
-      new GoogleInfrastructureProvider(googleCloudProvider, Collections.newSetFromMap(new ConcurrentHashMap<Agent, Boolean>()))
+        new GoogleInfrastructureProvider(Collections.newSetFromMap(new ConcurrentHashMap<Agent, Boolean>()))
 
     synchronizeGoogleInfrastructureProvider(googleInfrastructureProvider,
-                                            googleCloudProvider,
                                             accountCredentialsRepository,
                                             objectMapper,
                                             registry)
@@ -71,20 +85,57 @@ class GoogleInfrastructureProviderConfig {
 
   @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
   @Bean
-  GoogleInfrastructureProviderSynchronizer synchronizeGoogleInfrastructureProvider(GoogleInfrastructureProvider googleInfrastructureProvider,
-                                                                                   GoogleCloudProvider googleCloudProvider,
-                                                                                   AccountCredentialsRepository accountCredentialsRepository,
-                                                                                   ObjectMapper objectMapper,
-                                                                                   Registry registry) {
+  GoogleInfrastructureProviderSynchronizer synchronizeGoogleInfrastructureProvider(
+      GoogleInfrastructureProvider googleInfrastructureProvider,
+      AccountCredentialsRepository accountCredentialsRepository,
+      ObjectMapper objectMapper,
+      Registry registry) {
     def scheduledAccounts = ProviderUtils.getScheduledAccounts(googleInfrastructureProvider)
-    def allAccounts = ProviderUtils.buildThreadSafeSetOfAccounts(accountCredentialsRepository, GoogleNamedAccountCredentials)
+    def allAccounts = ProviderUtils.buildThreadSafeSetOfAccounts(accountCredentialsRepository,
+                                                                 GoogleNamedAccountCredentials)
+
+    objectMapper.enable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
 
     allAccounts.each { GoogleNamedAccountCredentials credentials ->
       if (!scheduledAccounts.contains(credentials.accountName)) {
         def newlyAddedAgents = []
+        def regions = credentials.regions.collect { it.name }
 
-        newlyAddedAgents << new GoogleSecurityGroupCachingAgent(googleCloudProvider, credentials.accountName, credentials.credentials, objectMapper, registry)
-        newlyAddedAgents << new GoogleNetworkCachingAgent(googleCloudProvider, credentials.accountName, credentials.credentials, objectMapper)
+        newlyAddedAgents << new GoogleSecurityGroupCachingAgent(googleConfiguration.googleApplicationName(),
+                                                                credentials,
+                                                                objectMapper,
+                                                                registry)
+        newlyAddedAgents << new GoogleNetworkCachingAgent(googleConfiguration.googleApplicationName(),
+                                                          credentials,
+                                                          objectMapper)
+
+        regions.each { String region ->
+          newlyAddedAgents << new GoogleSubnetCachingAgent(googleConfiguration.googleApplicationName(),
+                                                           credentials,
+                                                           objectMapper,
+                                                           region)
+        }
+
+        newlyAddedAgents << new GoogleInstanceCachingAgent(googleConfiguration.googleApplicationName(),
+                                                           credentials,
+                                                           objectMapper)
+        newlyAddedAgents << new GoogleImageCachingAgent(googleConfiguration.googleApplicationName(),
+                                                        credentials,
+                                                        objectMapper,
+                                                        credentials.imageProjects,
+                                                        googleConfiguration.googleConfigurationProperties().baseImageProjects)
+        regions.each { String region ->
+          newlyAddedAgents << new GoogleLoadBalancerCachingAgent(googleConfiguration.googleApplicationName(),
+                                                                 credentials,
+                                                                 objectMapper,
+                                                                 region,
+                                                                 registry)
+          newlyAddedAgents << new GoogleServerGroupCachingAgent(googleConfiguration.googleApplicationName(),
+                                                                credentials,
+                                                                objectMapper,
+                                                                region,
+                                                                registry)
+        }
 
         // If there is an agent scheduler, then this provider has been through the AgentController in the past.
         // In that case, we need to do the scheduling here (because accounts have been added to a running system).

@@ -361,13 +361,13 @@ class DiscoverySupportUnitSpec extends Specification {
     }]               | "test"  | "us-west-1" | "asg"   | false
   }
 
-  private ServerGroup buildServerGroup(String ... discoveryStatuses) {
+  private ServerGroup buildServerGroup(String ... eurekaStatuses) {
     return new DefaultServerGroup(
-      instances: discoveryStatuses.collect { String discoveryStatus ->
+      instances: eurekaStatuses.collect { String eurekaStatus ->
         Mock(com.netflix.spinnaker.clouddriver.model.Instance) {
           1 * getHealth() >> {
             [
-                [discoveryStatus: discoveryStatus]
+                [eurekaStatus: eurekaStatus]
             ]
           }
           0 * _
@@ -417,6 +417,7 @@ class DiscoverySupportUnitSpec extends Specification {
     ServerGroup.InstanceCounts instanceCounts
     ServerGroup.Capacity capacity
     Boolean isDisabled() {disabled}
-    ServerGroup.ImageSummary getImageSummary() {null}
+    ServerGroup.ImageSummary getImageSummary() {}
+    ServerGroup.ImagesSummary getImagesSummary() {}
   }
 }

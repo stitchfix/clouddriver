@@ -31,6 +31,10 @@ class SecurityGroupLookupFactory {
     new SecurityGroupLookup(amazonClientProvider, region, accounts)
   }
 
+  /**
+   * Allows look up for account names and security groups from a cache that lives as long as the instance.
+   * Can also be used to create a security group from a description.
+   */
   static class SecurityGroupLookup {
     private final AmazonClientProvider amazonClientProvider
     private final String region
@@ -66,11 +70,11 @@ class SecurityGroupLookupFactory {
       new SecurityGroupUpdater(newSecurityGroup, amazonEC2)
     }
 
-    SecurityGroupUpdater getSecurityGroupByName(String accountName, String name, String vpcId) {
+    SecurityGroupUpdater getSecurityGroupByName(String accountName, String name, String vpcId, boolean skipCache = false) {
       final credentials = getCredentialsForName(accountName)
       if (!credentials) { return null }
-      final amazonEC2 = amazonClientProvider.getAmazonEC2(credentials, region, true)
-      final securityGroup = getSecurityGroups(accountName, amazonEC2).find {
+      final amazonEC2 = amazonClientProvider.getAmazonEC2(credentials, region, skipCache)
+      final securityGroup = getSecurityGroups(accountName, amazonEC2, skipCache).find {
         it.groupName == name && it.vpcId == vpcId
       }
       if (securityGroup) {
@@ -79,9 +83,9 @@ class SecurityGroupLookupFactory {
       null
     }
 
-    private List<SecurityGroup> getSecurityGroups(String accountName, AmazonEC2 amazonEC2) {
+    private List<SecurityGroup> getSecurityGroups(String accountName, AmazonEC2 amazonEC2, boolean skipCache) {
       List<SecurityGroup> securityGroupsForAccount = securityGroupsByAccount[accountName]
-      if (!securityGroupsForAccount) {
+      if (securityGroupsForAccount == null || skipCache) {
         securityGroupsForAccount = amazonEC2.describeSecurityGroups().securityGroups
         securityGroupsByAccount[accountName] = securityGroupsForAccount
       }

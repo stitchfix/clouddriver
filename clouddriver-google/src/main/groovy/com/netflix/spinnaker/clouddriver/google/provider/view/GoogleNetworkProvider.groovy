@@ -33,25 +33,31 @@ import static com.netflix.spinnaker.clouddriver.google.cache.Keys.Namespace.NETW
 @Component
 class GoogleNetworkProvider implements NetworkProvider<GoogleNetwork> {
 
-  private final GoogleCloudProvider googleCloudProvider
   private final Cache cacheView
   final ObjectMapper objectMapper
 
+  final String cloudProvider = GoogleCloudProvider.GCE
+
   @Autowired
-  GoogleNetworkProvider(GoogleCloudProvider googleCloudProvider, Cache cacheView, ObjectMapper objectMapper) {
-    this.googleCloudProvider = googleCloudProvider
+  GoogleNetworkProvider(Cache cacheView, ObjectMapper objectMapper) {
     this.cacheView = cacheView
     this.objectMapper = objectMapper
   }
 
   @Override
-  String getCloudProvider() {
-    return googleCloudProvider.id
+  Set<GoogleNetwork> getAll() {
+    getAllMatchingKeyPattern(Keys.getNetworkKey('*', '*', '*'))
   }
 
-  @Override
-  Set<GoogleNetwork> getAll() {
-    cacheView.getAll(NETWORKS.ns, RelationshipCacheFilter.none()).collect(this.&fromCacheData)
+  Set<GoogleNetwork> getAllMatchingKeyPattern(String pattern) {
+    loadResults(cacheView.filterIdentifiers(NETWORKS.ns, pattern))
+  }
+
+  Set<GoogleNetwork> loadResults(Collection<String> identifiers) {
+    def data = cacheView.getAll(NETWORKS.ns, identifiers, RelationshipCacheFilter.none())
+    def transformed = data.collect(this.&fromCacheData)
+
+    return transformed
   }
 
   GoogleNetwork fromCacheData(CacheData cacheData) {
@@ -60,14 +66,16 @@ class GoogleNetworkProvider implements NetworkProvider<GoogleNetwork> {
     }
 
     Network network = objectMapper.convertValue(cacheData.attributes.network, Network)
-    Map<String, String> parts = Keys.parse(googleCloudProvider, cacheData.id)
+    Map<String, String> parts = Keys.parse(cacheData.id)
 
     new GoogleNetwork(
-      cloudProvider: googleCloudProvider.id,
+      cloudProvider: this.cloudProvider,
       id: network.name,
       name: network.name,
       account: parts.account,
-      region: parts.region
+      region: parts.region,
+      autoCreateSubnets: network.autoCreateSubnetworks,
+      subnets: network.subnetworks
     )
   }
 }
