@@ -16,9 +16,11 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy
 
+import com.google.api.services.compute.model.InstanceGroupManager
 import com.netflix.frigga.Names
+import com.netflix.spinnaker.clouddriver.google.ComputeVersion
 import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.helpers.AbstractServerGroupNameResolver
 
 class GCEServerGroupNameResolver extends AbstractServerGroupNameResolver {
@@ -27,9 +29,9 @@ class GCEServerGroupNameResolver extends AbstractServerGroupNameResolver {
 
   private final String project
   private final String region
-  private final GoogleCredentials credentials
+  private final GoogleNamedAccountCredentials credentials
 
-  GCEServerGroupNameResolver(String project, String region, GoogleCredentials credentials) {
+  GCEServerGroupNameResolver(String project, String region, GoogleNamedAccountCredentials credentials) {
     this.project = project
     this.region = region
     this.credentials = credentials
@@ -47,7 +49,21 @@ class GCEServerGroupNameResolver extends AbstractServerGroupNameResolver {
 
   @Override
   List<AbstractServerGroupNameResolver.TakenSlot> getTakenSlots(String clusterName) {
-    def managedInstanceGroups = GCEUtil.queryManagedInstanceGroups(project, region, credentials)
+    def regionalManagedInstanceGroups =
+      credentials.computeVersion == ComputeVersion.ALPHA ? GCEUtil.queryRegionalManagedInstanceGroups(project, region, credentials) : []
+    def zonalManagedInstanceGroups = GCEUtil.queryZonalManagedInstanceGroups(project, region, credentials)
+
+    def matchingRegionalManagedInstanceGroups = findMatchingManagedInstanceGroups(regionalManagedInstanceGroups, clusterName)
+    def matchingZonalManagedInstanceGroups = findMatchingManagedInstanceGroups(zonalManagedInstanceGroups, clusterName)
+
+    return matchingRegionalManagedInstanceGroups + matchingZonalManagedInstanceGroups
+  }
+
+  private List<AbstractServerGroupNameResolver.TakenSlot> findMatchingManagedInstanceGroups(
+      List<InstanceGroupManager> managedInstanceGroups, String clusterName) {
+    if (!managedInstanceGroups) {
+      return []
+    }
 
     return managedInstanceGroups.findResults { managedInstanceGroup ->
       def names = Names.parseName(managedInstanceGroup.name)

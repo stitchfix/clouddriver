@@ -17,6 +17,7 @@
 package com.netflix.spinnaker.clouddriver.google.deploy.ops
 
 import com.google.api.services.compute.model.InstanceGroupManagersSetInstanceTemplateRequest
+import com.google.api.services.compute.model.RegionInstanceGroupManagersSetTemplateRequest
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
@@ -83,13 +84,18 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperation implements AtomicOp
     def region = description.region
     def serverGroupName = description.serverGroupName
     def serverGroup = GCEUtil.queryServerGroup(googleClusterProvider, accountName, region, serverGroupName)
+    def isRegional = serverGroup.regional
+    // Will return null if this is a regional server group.
     def zone = serverGroup.zone
 
-    def instanceGroupManagers = compute.instanceGroupManagers()
+    def instanceGroupManagers = isRegional ? compute.regionInstanceGroupManagers() : compute.instanceGroupManagers()
     def instanceTemplates = compute.instanceTemplates()
 
     // Retrieve the managed instance group.
-    def managedInstanceGroup = instanceGroupManagers.get(project, zone, serverGroupName).execute()
+    def managedInstanceGroup =
+      isRegional
+      ? instanceGroupManagers.get(project, region, serverGroupName).execute()
+      : instanceGroupManagers.get(project, zone, serverGroupName).execute()
     def origInstanceTemplateName = GCEUtil.getLocalName(managedInstanceGroup.instanceTemplate)
 
     if (!origInstanceTemplateName) {
@@ -176,11 +182,12 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperation implements AtomicOp
         instanceTemplateProperties.setTags(tags)
       }
 
-      // Override the instance template's auth scopes if authScopes was specified.
-      if (overriddenProperties.authScopes != null) {
-        def serviceAccount = GCEUtil.buildServiceAccount(description.authScopes)
+      // Override the instance template's service account if serviceAccountEmail or authScopes was specified.
+      // Note that we want to explicitly allow for either the service account or auth scopes to be empty, but non-null.
+      if (overriddenProperties.serviceAccountEmail != null || overriddenProperties.authScopes != null) {
+        def serviceAccount = GCEUtil.buildServiceAccount(description.serviceAccountEmail, description.authScopes)
 
-        instanceTemplateProperties.setServiceAccounts([serviceAccount])
+        instanceTemplateProperties.setServiceAccounts(serviceAccount)
       }
 
       // Override the instance template's network if network was specified.
@@ -206,14 +213,25 @@ class ModifyGoogleServerGroupInstanceTemplateAtomicOperation implements AtomicOp
       // Set the new instance template on the managed instance group.
       task.updateStatus BASE_PHASE, "Setting instance template $instanceTemplate.name on server group $serverGroupName..."
 
-      def instanceGroupManagersSetInstanceTemplateRequest =
+      if (isRegional) {
+        def regionInstanceGroupManagersSetTemplateRequest =
+          new RegionInstanceGroupManagersSetTemplateRequest(instanceTemplate: instanceTemplateUrl)
+        def setInstanceTemplateOperation = instanceGroupManagers.setInstanceTemplate(
+          project, region, serverGroupName, regionInstanceGroupManagersSetTemplateRequest).execute()
+
+        // Block on setting the instance template on the managed instance group.
+        googleOperationPoller.waitForRegionalOperation(compute, project, region,
+          setInstanceTemplateOperation.getName(), null, task, "server group $serverGroupName", BASE_PHASE)
+      } else {
+        def instanceGroupManagersSetInstanceTemplateRequest =
           new InstanceGroupManagersSetInstanceTemplateRequest(instanceTemplate: instanceTemplateUrl)
-      def setInstanceTemplateOperation = instanceGroupManagers.setInstanceTemplate(
+        def setInstanceTemplateOperation = instanceGroupManagers.setInstanceTemplate(
           project, zone, serverGroupName, instanceGroupManagersSetInstanceTemplateRequest).execute()
 
-      // Block on setting the instance template on the managed instance group.
-      googleOperationPoller.waitForZonalOperation(compute, project, zone,
+        // Block on setting the instance template on the managed instance group.
+        googleOperationPoller.waitForZonalOperation(compute, project, zone,
           setInstanceTemplateOperation.getName(), null, task, "server group $serverGroupName", BASE_PHASE)
+      }
 
       // Delete the original instance template.
       task.updateStatus BASE_PHASE, "Deleting original instance template $origInstanceTemplateName..."

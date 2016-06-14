@@ -25,14 +25,13 @@ import com.netflix.spinnaker.clouddriver.google.deploy.description.AbandonAndDec
 import com.netflix.spinnaker.clouddriver.google.model.GoogleInstance
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import spock.lang.Specification
 import spock.lang.Subject
+import spock.lang.Unroll
 
 class AbandonAndDecrementGoogleServerGroupAtomicOperationUnitSpec extends Specification {
   private static final SERVER_GROUP_NAME = "my-server-group"
-  private static final SERVER_GROUP_SELF_LINK =
-    "https://www.googleapis.com/compute/v1/projects/shared-spinnaker/zones/us-central1-f/instanceGroupManagers/$SERVER_GROUP_NAME"
   private static final REGION = "us-central1"
   private static final ZONE = "us-central1-f"
   private static final ACCOUNT_NAME = "auto"
@@ -47,10 +46,12 @@ class AbandonAndDecrementGoogleServerGroupAtomicOperationUnitSpec extends Specif
     TaskRepository.threadLocalTask.set(Mock(Task))
   }
 
+  @Unroll
   void "should abandon instances"() {
     setup:
       def googleClusterProviderMock = Mock(GoogleClusterProvider)
       def serverGroup = new GoogleServerGroup(
+          regional: isRegional,
           zone: ZONE,
           instances: INSTANCE_URLS.collect {
             new GoogleInstance(
@@ -60,10 +61,12 @@ class AbandonAndDecrementGoogleServerGroupAtomicOperationUnitSpec extends Specif
       ).view
       def computeMock = Mock(Compute)
       def request = new InstanceGroupManagersAbandonInstancesRequest().setInstances(INSTANCE_URLS)
+      def regionInstanceGroupManagersMock = Mock(Compute.RegionInstanceGroupManagers)
+      def regionInstanceGroupManagersAbandonInstancesMock = Mock(Compute.RegionInstanceGroupManagers.AbandonInstances)
       def instanceGroupManagersMock = Mock(Compute.InstanceGroupManagers)
       def instanceGroupManagersAbandonInstancesMock = Mock(Compute.InstanceGroupManagers.AbandonInstances)
 
-      def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
+      def credentials = new GoogleNamedAccountCredentials.Builder().project(PROJECT_NAME).compute(computeMock).build()
       def description = new AbandonAndDecrementGoogleServerGroupDescription(
           serverGroupName: SERVER_GROUP_NAME,
           region: REGION,
@@ -78,11 +81,26 @@ class AbandonAndDecrementGoogleServerGroupAtomicOperationUnitSpec extends Specif
 
     then:
       1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, SERVER_GROUP_NAME) >> serverGroup
-      1 * computeMock.instanceGroupManagers() >> instanceGroupManagersMock
-      1 * instanceGroupManagersMock.abandonInstances(PROJECT_NAME,
-                                                     ZONE,
-                                                     SERVER_GROUP_NAME,
-                                                     request) >> instanceGroupManagersAbandonInstancesMock
-      1 * instanceGroupManagersAbandonInstancesMock.execute()
+
+      if (isRegional) {
+        1 * computeMock.regionInstanceGroupManagers() >> regionInstanceGroupManagersMock
+        1 * regionInstanceGroupManagersMock.abandonInstances(PROJECT_NAME,
+                                                             location,
+                                                             SERVER_GROUP_NAME,
+                                                             request) >> regionInstanceGroupManagersAbandonInstancesMock
+        1 * regionInstanceGroupManagersAbandonInstancesMock.execute()
+      } else {
+        1 * computeMock.instanceGroupManagers() >> instanceGroupManagersMock
+        1 * instanceGroupManagersMock.abandonInstances(PROJECT_NAME,
+                                                       location,
+                                                       SERVER_GROUP_NAME,
+                                                       request) >> instanceGroupManagersAbandonInstancesMock
+        1 * instanceGroupManagersAbandonInstancesMock.execute()
+      }
+
+    where:
+      isRegional | location
+      false      | ZONE
+      true       | REGION
   }
 }

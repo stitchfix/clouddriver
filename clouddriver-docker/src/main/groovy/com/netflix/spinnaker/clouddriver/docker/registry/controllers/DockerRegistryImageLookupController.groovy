@@ -50,7 +50,7 @@ class DockerRegistryImageLookupController {
       def lastColon = lookupOptions.q.lastIndexOf(':')
       if (lastColon != -1) {
         image = lookupOptions.q.substring(0, lastColon)
-        tag = lookupOptions.q.(lastColon + 1)
+        tag = lookupOptions.q.substring(lastColon + 1)
       } else {
         image = lookupOptions.q
       }
@@ -63,6 +63,10 @@ class DockerRegistryImageLookupController {
     def key = Keys.getTaggedImageKey(account, image, tag)
 
     Set<CacheData> images = DockerRegistryProviderUtils.getAllMatchingKeyPattern(cacheView, Keys.Namespace.TAGGED_IMAGE.ns, key)
+
+    if (lookupOptions.count) {
+      images = images.take(lookupOptions.count)
+    }
 
     return images.collect({
       def credentials = (DockerRegistryNamedAccountCredentials) accountCredentialsProvider.getCredentials((String) it.attributes.account)
@@ -85,5 +89,6 @@ class DockerRegistryImageLookupController {
     String q
     String account
     String region
+    Integer count
   }
 }

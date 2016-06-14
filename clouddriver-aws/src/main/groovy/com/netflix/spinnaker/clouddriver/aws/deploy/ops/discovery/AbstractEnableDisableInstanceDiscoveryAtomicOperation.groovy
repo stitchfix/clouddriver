@@ -20,6 +20,7 @@ import com.amazonaws.services.autoscaling.model.AutoScalingGroup
 import com.amazonaws.services.elasticloadbalancing.model.Instance
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
+import com.netflix.spinnaker.clouddriver.eureka.deploy.ops.AbstractEurekaSupport
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
 import com.netflix.spinnaker.clouddriver.aws.deploy.description.EnableDisableInstanceDiscoveryDescription
 import com.netflix.spinnaker.clouddriver.aws.services.RegionScopedProviderFactory
@@ -34,7 +35,7 @@ abstract class AbstractEnableDisableInstanceDiscoveryAtomicOperation implements 
   RegionScopedProviderFactory regionScopedProviderFactory
 
   @Autowired
-  DiscoverySupport discoverySupport
+  AwsEurekaSupport discoverySupport
 
   EnableDisableInstanceDiscoveryDescription description
 
@@ -67,7 +68,7 @@ abstract class AbstractEnableDisableInstanceDiscoveryAtomicOperation implements 
         return
       }
 
-      def status = isEnable() ? DiscoverySupport.DiscoveryStatus.Enable : DiscoverySupport.DiscoveryStatus.Disable
+      def status = isEnable() ? AbstractEurekaSupport.DiscoveryStatus.Enable : AbstractEurekaSupport.DiscoveryStatus.Disable
       discoverySupport.updateDiscoveryStatusForInstances(
           description, task, phaseName, status, instancesInAsg*.instanceId
       )

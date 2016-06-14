@@ -79,10 +79,11 @@ class DestroyAzureServerGroupAtomicOperation implements AtomicOperation<Void> {
         // Clean-up the storrage account, load balancer and the subnet that where attached to the server group
         if (errList.isEmpty()) {
           // Remove association between server group and the assigned application gateway backend address pool
+          task.updateStatus(BASE_PHASE, "Remove backend address pool in $description.appGatewayName")
           description
             .credentials
             .networkClient
-            .removeAppGatewayBAPforServerGroup(resourceGroupName, description.appGatewayName, description.name)
+            .removeAppGatewayBAPforServerGroup(resourceGroupName, serverGroupDescription.appGatewayName, serverGroupDescription.name)
 
           // Delete storage accounts if any
           serverGroupDescription.storageAccountNames?.each { def storageAccountName ->

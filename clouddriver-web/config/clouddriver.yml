@@ -33,6 +33,7 @@ swagger:
     - .*azure.*
     - .*gce.*
     - .*kubernetes.*
+    - .*openstack.*
     - .*instances.*
     - .*reports.*
     - .*docker.*
@@ -127,7 +128,6 @@ google:
   - centos-cloud
   - coreos-cloud
   - debian-cloud
-  - google-containers
   - opensuse-cloud
   - rhel-cloud
   - suse-cloud
@@ -251,6 +251,20 @@ google:
       disks:
       - type: pd-standard
         sizeGb: 10
+
+openstack:
+  enabled: ${OS_ENABLED:false}
+  accounts:
+    - name: test
+      environment: test
+      accountType: v2
+      master: test
+      username: ${OS_USERNAME:'username'}
+      password: ${OS_PASSWORD:'password'}
+      tenantName: ${OS_TENANT_NAME:''}
+      domainName: Default
+      endpoint: ${OS_AUTH_URL:''}
+      insecure: ${OS_INSECURE:false}
 
 kubernetes:
   enabled: false

@@ -99,6 +99,7 @@ class CreateAzureServerGroupAtomicOperation implements AtomicOperation<Map> {
       if (!description.appGatewayName) {
         description.appGatewayName = description.loadBalancerName
       }
+      task.updateStatus(BASE_PHASE, "Create new backend address pool in $description.appGatewayName")
       appGatewayPoolID = description.credentials
         .networkClient
         .createAppGatewayBAPforServerGroup(resourceGroupName, description.appGatewayName, description.name)
@@ -120,7 +121,7 @@ class CreateAzureServerGroupAtomicOperation implements AtomicOperation<Map> {
       }
 
       // If Linux, set up connection on port 22 (ssh) otherwise use port 3389 (rdp)
-      def backendPort = description.image.ostype == "Linux" ? 22 : 3389
+      def backendPort = description.image.ostype.toLowerCase() == "linux" ? 22 : 3389
       description.addInboundPortConfig(AzureUtilities.INBOUND_NATPOOL_PREFIX + description.name, 50000, 50099, "tcp", backendPort)
 
       if (errList.isEmpty()) {

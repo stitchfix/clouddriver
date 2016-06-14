@@ -40,7 +40,7 @@ import com.netflix.spinnaker.clouddriver.google.model.GoogleSecurityGroup
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleSecurityGroupProvider
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 
 class GCEUtil {
   private static final String DISK_TYPE_PERSISTENT = "PERSISTENT"
@@ -237,16 +237,29 @@ class GCEUtil {
     }
   }
 
-  static InstanceGroupManager queryManagedInstanceGroup(String projectName,
-                                                        String zone,
-                                                        String serverGroupName,
-                                                        GoogleCredentials credentials) {
+  static InstanceGroupManager queryRegionalManagedInstanceGroup(String projectName,
+                                                                String region,
+                                                                String serverGroupName,
+                                                                GoogleNamedAccountCredentials credentials) {
+    credentials.compute.regionInstanceGroupManagers().get(projectName, region, serverGroupName).execute()
+  }
+
+  static InstanceGroupManager queryZonalManagedInstanceGroup(String projectName,
+                                                             String zone,
+                                                             String serverGroupName,
+                                                             GoogleNamedAccountCredentials credentials) {
     credentials.compute.instanceGroupManagers().get(projectName, zone, serverGroupName).execute()
   }
 
-  static List<InstanceGroupManager> queryManagedInstanceGroups(String projectName,
-                                                               String region,
-                                                               GoogleCredentials credentials) {
+  static List<InstanceGroupManager> queryRegionalManagedInstanceGroups(String projectName,
+                                                                       String region,
+                                                                       GoogleNamedAccountCredentials credentials) {
+    return credentials.compute.regionInstanceGroupManagers().list(projectName, region).execute().getItems()
+  }
+
+  static List<InstanceGroupManager> queryZonalManagedInstanceGroups(String projectName,
+                                                                    String region,
+                                                                    GoogleNamedAccountCredentials credentials) {
     def compute = credentials.compute
     def zones = getZonesFromRegion(projectName, region, compute)
 
@@ -359,6 +372,7 @@ class GCEUtil {
     }
 
     def networkInterface = instanceTemplateProperties.networkInterfaces[0]
+    def serviceAccountEmail = instanceTemplateProperties.serviceAccounts?.getAt(0)?.email
 
     return new BaseGoogleInstanceDescription(
       image: image,
@@ -369,7 +383,8 @@ class GCEUtil {
       },
       tags: instanceTemplateProperties.tags?.items,
       network: getLocalName(networkInterface.network),
-      authScopes: retrieveScopesFromDefaultServiceAccount(instanceTemplateProperties.serviceAccounts)
+      serviceAccountEmail: serviceAccountEmail,
+      authScopes: retrieveScopesFromServiceAccount(serviceAccountEmail, instanceTemplateProperties.serviceAccounts)
     )
   }
 
@@ -416,8 +431,8 @@ class GCEUtil {
     }
   }
 
-  static List<String> retrieveScopesFromDefaultServiceAccount(List<ServiceAccount> serviceAccounts) {
-    serviceAccounts?.find { it.email == "default" }?.scopes
+  static List<String> retrieveScopesFromServiceAccount(String serviceAccountEmail, List<ServiceAccount> serviceAccounts) {
+    return serviceAccountEmail ? serviceAccounts?.find { it.email == serviceAccountEmail }?.scopes : null
   }
 
   static String buildDiskTypeUrl(String projectName, String zone, GoogleDiskType diskType) {
@@ -540,8 +555,11 @@ class GCEUtil {
     }
   }
 
-  static ServiceAccount buildServiceAccount(List<String> authScopes) {
-    return authScopes ? new ServiceAccount(email: "default", scopes: resolveAuthScopes(authScopes)) : null
+  // We only support zero or one service account per instance/instance-template.
+  static List<ServiceAccount> buildServiceAccount(String serviceAccountEmail, List<String> authScopes) {
+    return serviceAccountEmail && authScopes
+           ? [new ServiceAccount(email: serviceAccountEmail, scopes: resolveAuthScopes(authScopes))]
+           : []
   }
 
   static ServiceAccount buildScheduling(BaseGoogleInstanceDescription description) {

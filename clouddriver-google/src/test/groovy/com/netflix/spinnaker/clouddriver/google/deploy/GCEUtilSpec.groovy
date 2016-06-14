@@ -27,12 +27,14 @@ import com.google.api.services.compute.model.ImageList
 import com.google.api.services.compute.model.Instance
 import com.google.api.services.compute.model.InstanceAggregatedList
 import com.google.api.services.compute.model.InstancesScopedList
+import com.google.api.services.compute.model.ServiceAccount
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BaseGoogleInstanceDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleResourceNotFoundException
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.FakeGoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import groovy.mock.interceptor.MockFor
 import spock.lang.Shared
 import spock.lang.Specification
@@ -49,7 +51,7 @@ class GCEUtilSpec extends Specification {
   private static final INSTANCE_URL_2 = "https://www.googleapis.com/compute/v1/projects/$PROJECT_NAME/zones/us-central1-b/instances/$INSTANCE_LOCAL_NAME_2"
   private static final BASE_DESCRIPTION_1 = new BaseGoogleInstanceDescription(image: IMAGE_NAME)
   private static final IMAGE_PROJECT_NAME = "some-image-project"
-  private static final CREDENTIALS = new GoogleCredentials(null, null, [IMAGE_PROJECT_NAME])
+  private static final CREDENTIALS = new GoogleNamedAccountCredentials.Builder().imageProjects([IMAGE_PROJECT_NAME]).credentials(new FakeGoogleCredentials()).build()
   private static final BASE_DESCRIPTION_2 = new BaseGoogleInstanceDescription(image: IMAGE_NAME, credentials: CREDENTIALS)
   private static final GOOGLE_APPLICATION_NAME = "test"
   private static final BASE_IMAGE_PROJECTS = ["centos-cloud", "ubuntu-os-cloud"]
@@ -373,30 +375,28 @@ class GCEUtilSpec extends Specification {
   }
 
   @Unroll
-  void "buildServiceAccount should return null when no authScopes are specified"() {
-    when:
-      def serviceAccount = GCEUtil.buildServiceAccount(authScopes)
-
-    then:
-      serviceAccount == null
+  void "buildServiceAccount should return an empty list when either email or authScopes are unspecified"() {
+    expect:
+      GCEUtil.buildServiceAccount(serviceAccountEmail, authScopes) == []
 
     where:
-      authScopes << [null, []]
+      serviceAccountEmail                      | authScopes
+      null                                     | ["some-scope"]
+      ""                                       | ["some-scope"]
+      "something@test.iam.gserviceaccount.com" | null
+      "something@test.iam.gserviceaccount.com" | []
   }
 
   @Unroll
   void "buildServiceAccount should prepend base url if necessary"() {
-    when:
-      def serviceAccount = GCEUtil.buildServiceAccount(authScopes)
-
-    then:
-      serviceAccount.scopes == expectedScopes
+    expect:
+      GCEUtil.buildServiceAccount("default", authScopes) == expectedServiceAccount
 
     where:
-      authScopes                                                   | expectedScopes
-      ["cloud-platform"]                                           | ["https://www.googleapis.com/auth/cloud-platform"]
-      ["devstorage.read_only"]                                     | ["https://www.googleapis.com/auth/devstorage.read_only"]
-      ["https://www.googleapis.com/auth/logging.write", "compute"] | ["https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/compute"]
+      authScopes                                                   || expectedServiceAccount
+      ["cloud-platform"]                                           || [new ServiceAccount(email: "default", scopes: ["https://www.googleapis.com/auth/cloud-platform"])]
+      ["devstorage.read_only"]                                     || [new ServiceAccount(email: "default", scopes: ["https://www.googleapis.com/auth/devstorage.read_only"])]
+      ["https://www.googleapis.com/auth/logging.write", "compute"] || [new ServiceAccount(email: "default", scopes: ["https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/compute"])]
   }
 
   @Unroll

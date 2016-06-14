@@ -16,10 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy.description
 
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
-
-class DeleteGoogleSecurityGroupDescription {
+class DeleteGoogleSecurityGroupDescription extends AbstractGoogleCredentialsDescription {
   String securityGroupName
   String accountName
-  GoogleCredentials credentials
 }

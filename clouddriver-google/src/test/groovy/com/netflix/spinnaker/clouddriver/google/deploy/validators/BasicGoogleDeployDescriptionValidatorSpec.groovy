@@ -20,13 +20,14 @@ import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDisk
 import com.netflix.spinnaker.clouddriver.google.model.GoogleInstanceTypeDisk
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.FakeGoogleCredentials
 import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.security.DefaultAccountCredentialsProvider
 import com.netflix.spinnaker.clouddriver.security.MapBackedAccountCredentialsRepository
 import org.springframework.validation.Errors
 import spock.lang.Shared
 import spock.lang.Specification
+import spock.lang.Unroll
 
 class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
   private static final APPLICATION = "spinnaker"
@@ -48,6 +49,7 @@ class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
   private static final DISK_ZERO_SIZE = new GoogleDisk(type: "pd-ssd", sizeGb: 0)
   private static final DISK_TOO_SMALL_SIZE = new GoogleDisk(type: "pd-ssd", sizeGb: 7)
   private static final DISK_NO_TYPE = new GoogleDisk(sizeGb: 125)
+  private static final REGION = "us-central1"
   private static final ZONE = "us-central1-b"
   private static final TAGS = ["some-tag-1", "some-tag-2", "some-tag-3"]
   private static final ACCOUNT_NAME = "auto"
@@ -60,13 +62,12 @@ class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
     validator = new BasicGoogleDeployDescriptionValidator(googleDeployDefaults: googleDeployDefaults)
     def credentialsRepo = new MapBackedAccountCredentialsRepository()
     def credentialsProvider = new DefaultAccountCredentialsProvider(credentialsRepo)
-    def credentials = Mock(GoogleNamedAccountCredentials)
-    credentials.getName() >> ACCOUNT_NAME
-    credentials.getCredentials() >> new GoogleCredentials(null, null)
+    def credentials = new GoogleNamedAccountCredentials.Builder().name(ACCOUNT_NAME).credentials(new FakeGoogleCredentials()).build()
     credentialsRepo.save(ACCOUNT_NAME, credentials)
     validator.accountCredentialsProvider = credentialsProvider
   }
 
+  @Unroll
   void "pass validation with proper description inputs"() {
     setup:
       def description = new BasicGoogleDeployDescription(application: APPLICATION,
@@ -75,7 +76,9 @@ class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
                                                          image: IMAGE,
                                                          instanceType: INSTANCE_TYPE,
                                                          disks: [DISK_PD_STANDARD],
-                                                         zone: ZONE,
+                                                         regional: regional,
+                                                         region: region,
+                                                         zone: zone,
                                                          accountName: ACCOUNT_NAME)
       def errors = Mock(Errors)
 
@@ -84,6 +87,12 @@ class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
 
     then:
       0 * errors._
+
+    where:
+      regional | region | zone
+      true     | REGION | null
+      false    | null   | ZONE
+      null     | null   | ZONE
   }
 
   void "pass validation with proper description inputs and free-form details"() {
@@ -247,9 +256,10 @@ class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
                              "Instance type $INSTANCE_TYPE does not support Local SSD.")
   }
 
+  @Unroll
   void "null input fails validation"() {
     setup:
-      def description = new BasicGoogleDeployDescription()
+      def description = new BasicGoogleDeployDescription(regional: regional)
       def errors = Mock(Errors)
 
     when:
@@ -260,7 +270,16 @@ class BasicGoogleDeployDescriptionValidatorSpec extends Specification {
       1 * errors.rejectValue('application', _)
       1 * errors.rejectValue('image', _)
       1 * errors.rejectValue('instanceType', _)
-      1 * errors.rejectValue('zone', _)
+      1 * errors.rejectValue('targetSize', _)
+
+      if (regional) {
+        1 * errors.rejectValue('region', _)
+      } else {
+        1 * errors.rejectValue('zone', _)
+      }
+
+    where:
+      regional << [true, false, null]
   }
 
   void "nonsensical autoscaling policy min, max or cooldown fails validation"() {

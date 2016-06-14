@@ -24,7 +24,6 @@ import com.netflix.spinnaker.clouddriver.google.model.GoogleLoadBalancer
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleLoadBalancerProvider
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestMethod
@@ -71,6 +70,10 @@ class GoogleLoadBalancerController {
                                                                      @PathVariable String name) {
     GoogleLoadBalancer.View view = googleLoadBalancerProvider.getApplicationLoadBalancers(name).find { view ->
       view.account == account && view.region == region
+    }
+
+    if (!view) {
+      return []
     }
 
     [new GoogleLoadBalancerDetails(loadBalancerName: view.name,

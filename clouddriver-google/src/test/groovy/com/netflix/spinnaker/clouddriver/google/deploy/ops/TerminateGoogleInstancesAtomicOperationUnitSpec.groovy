@@ -25,7 +25,7 @@ import com.netflix.spinnaker.clouddriver.google.deploy.description.TerminateGoog
 import com.netflix.spinnaker.clouddriver.google.model.GoogleInstance
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
-import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import spock.lang.Specification
 import spock.lang.Subject
 
@@ -57,7 +57,7 @@ class TerminateGoogleInstancesAtomicOperationUnitSpec extends Specification {
       def computeMock = Mock(Compute)
       def instancesMock = Mock(Compute.Instances)
       def deleteMock = Mock(Compute.Instances.Delete)
-      def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
+      def credentials = new GoogleNamedAccountCredentials.Builder().project(PROJECT_NAME).compute(computeMock).build()
       def description = new TerminateGoogleInstancesDescription(zone: ZONE,
                                                                 instanceIds: GOOD_INSTANCE_IDS,
                                                                 accountName: ACCOUNT_NAME,
@@ -81,7 +81,7 @@ class TerminateGoogleInstancesAtomicOperationUnitSpec extends Specification {
       def computeMock = Mock(Compute)
       def instancesMock = Mock(Compute.Instances)
       def deleteMock = Mock(Compute.Instances.Delete)
-      def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
+      def credentials = new GoogleNamedAccountCredentials.Builder().project(PROJECT_NAME).compute(computeMock).build()
       def description = new TerminateGoogleInstancesDescription(zone: ZONE,
                                                                 instanceIds: ALL_INSTANCE_IDS,
                                                                 accountName: ACCOUNT_NAME,
@@ -110,6 +110,7 @@ class TerminateGoogleInstancesAtomicOperationUnitSpec extends Specification {
     setup:
       def googleClusterProviderMock = Mock(GoogleClusterProvider)
       def serverGroup = new GoogleServerGroup(
+        regional: isRegional,
         zone: ZONE,
         instances: GOOD_INSTANCE_URLS.collect {
           new GoogleInstance(
@@ -118,11 +119,13 @@ class TerminateGoogleInstancesAtomicOperationUnitSpec extends Specification {
         }
       ).view
       def computeMock = Mock(Compute)
-      def instanceGroupManagersMock = Mock(Compute.InstanceGroupManagers)
       def request = new InstanceGroupManagersRecreateInstancesRequest().setInstances(GOOD_INSTANCE_URLS)
+      def regionInstanceGroupManagersMock = Mock(Compute.RegionInstanceGroupManagers)
+      def regionInstanceGroupManagersRecreateInstancesMock = Mock(Compute.RegionInstanceGroupManagers.RecreateInstances)
+      def instanceGroupManagersMock = Mock(Compute.InstanceGroupManagers)
+      def instanceGroupManagersRecreateInstancesMock = Mock(Compute.InstanceGroupManagers.RecreateInstances)
 
-      def instanceGroupManagersRecreateMock = Mock(Compute.InstanceGroupManagers.RecreateInstances)
-      def credentials = new GoogleCredentials(PROJECT_NAME, computeMock)
+      def credentials = new GoogleNamedAccountCredentials.Builder().project(PROJECT_NAME).compute(computeMock).build()
       def description = new TerminateGoogleInstancesDescription(serverGroupName: MANAGED_INSTANCE_GROUP_NAME,
                                                                 instanceIds: GOOD_INSTANCE_IDS,
                                                                 region: REGION,
@@ -136,11 +139,26 @@ class TerminateGoogleInstancesAtomicOperationUnitSpec extends Specification {
 
     then:
       1 * googleClusterProviderMock.getServerGroup(ACCOUNT_NAME, REGION, MANAGED_INSTANCE_GROUP_NAME) >> serverGroup
-      1 * computeMock.instanceGroupManagers() >> instanceGroupManagersMock
-      1 * instanceGroupManagersMock.recreateInstances(PROJECT_NAME,
-                                                      ZONE,
-                                                      MANAGED_INSTANCE_GROUP_NAME,
-                                                      request) >> instanceGroupManagersRecreateMock
-      1 * instanceGroupManagersRecreateMock.execute()
+
+      if (isRegional) {
+        1 * computeMock.regionInstanceGroupManagers() >> regionInstanceGroupManagersMock
+        1 * regionInstanceGroupManagersMock.recreateInstances(PROJECT_NAME,
+                                                              location,
+                                                              MANAGED_INSTANCE_GROUP_NAME,
+                                                              request) >> regionInstanceGroupManagersRecreateInstancesMock
+        1 * regionInstanceGroupManagersRecreateInstancesMock.execute()
+      } else {
+        1 * computeMock.instanceGroupManagers() >> instanceGroupManagersMock
+        1 * instanceGroupManagersMock.recreateInstances(PROJECT_NAME,
+                                                        location,
+                                                        MANAGED_INSTANCE_GROUP_NAME,
+                                                        request) >> instanceGroupManagersRecreateInstancesMock
+        1 * instanceGroupManagersRecreateInstancesMock.execute()
+      }
+
+    where:
+      isRegional | location
+      false      | ZONE
+      true       | REGION
   }
 }

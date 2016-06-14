@@ -16,12 +16,15 @@
 
 package com.netflix.spinnaker.clouddriver.aws.deploy.converters
 
+import com.netflix.spinnaker.clouddriver.aws.AmazonOperation
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
+import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
 import com.netflix.spinnaker.clouddriver.security.AbstractAtomicOperationsCredentialsSupport
 import com.netflix.spinnaker.clouddriver.aws.deploy.description.EnableDisableInstanceDiscoveryDescription
 import com.netflix.spinnaker.clouddriver.aws.deploy.ops.discovery.DisableInstancesInDiscoveryAtomicOperation
 import org.springframework.stereotype.Component
 
+@AmazonOperation(AtomicOperations.DISABLE_INSTANCES_IN_EUREKA)
 @Component("disableInstancesInDiscoveryDescription")
 class DisableInstancesInDiscoveryAtomicOperationConverter extends AbstractAtomicOperationsCredentialsSupport {
   @Override

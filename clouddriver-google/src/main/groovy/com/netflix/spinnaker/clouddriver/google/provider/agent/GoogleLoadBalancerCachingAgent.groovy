@@ -23,7 +23,6 @@ import com.google.api.client.http.HttpHeaders
 import com.google.api.services.compute.model.ForwardingRule
 import com.google.api.services.compute.model.HealthStatus
 import com.google.api.services.compute.model.InstanceReference
-import com.google.api.services.compute.model.TargetPool
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.cats.agent.AgentDataType
 import com.netflix.spinnaker.cats.agent.CacheResult
@@ -126,7 +125,7 @@ class GoogleLoadBalancerCachingAgent extends AbstractGoogleCachingAgent implemen
     }
 
     log.info "Caching ${cacheResultBuilder.namespace(LOAD_BALANCERS.ns).keepSize()} load balancers in ${agentType}"
-    log.info "Caching ${cacheResultBuilder.namespace(INSTANCES.ns).keepSize()} instance relationsihps in ${agentType}"
+    log.info "Caching ${cacheResultBuilder.namespace(INSTANCES.ns).keepSize()} instance relationships in ${agentType}"
 
     cacheResultBuilder.build()
   }
@@ -234,7 +233,7 @@ class GoogleLoadBalancerCachingAgent extends AbstractGoogleCachingAgent implemen
   class HttpHealthCheckCallback<HttpHealthCheck> extends JsonBatchCallback<HttpHealthCheck> implements FailureLogger {
 
     GoogleLoadBalancer googleLoadBalancer
-    TargetPool targetPool
+    def targetPool
 
     BatchRequest instanceHealthRequest
 
@@ -253,14 +252,13 @@ class GoogleLoadBalancerCachingAgent extends AbstractGoogleCachingAgent implemen
       new TargetPoolInstanceHealthCallInvoker(googleLoadBalancer: googleLoadBalancer,
                                               targetPool: targetPool,
                                               instanceHealthRequest: instanceHealthRequest).doCall()
-
     }
   }
 
   class TargetPoolInstanceHealthCallInvoker {
 
     GoogleLoadBalancer googleLoadBalancer
-    TargetPool targetPool
+    def targetPool
 
     BatchRequest instanceHealthRequest
 
