@@ -72,19 +72,19 @@ class AmazonCredentialsInitializer implements CredentialsInitializerSynchronizab
   List<? extends NetflixAmazonCredentials> netflixAmazonCredentials(CredentialsLoader<? extends NetflixAmazonCredentials> credentialsLoader,
                                                                     CredentialsConfig credentialsConfig,
                                                                     AccountCredentialsRepository accountCredentialsRepository,
-                                                                    @Value('${default.account.env:default}') String defaultEnv) {
-    synchronizeAmazonAccounts(credentialsLoader, credentialsConfig, accountCredentialsRepository, defaultEnv, null)
+                                                                    @Value('${default.account.env:default}') String defaultAccountName) {
+    synchronizeAmazonAccounts(credentialsLoader, credentialsConfig, accountCredentialsRepository, defaultAccountName, null)
   }
 
   @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
   @Bean
-  List<?> synchronizeAmazonAccounts(CredentialsLoader<? extends NetflixAmazonCredentials> credentialsLoader,
+  List<? extends NetflixAmazonCredentials> synchronizeAmazonAccounts(CredentialsLoader<? extends NetflixAmazonCredentials> credentialsLoader,
                                     CredentialsConfig credentialsConfig,
                                     AccountCredentialsRepository accountCredentialsRepository,
-                                    @Value('${default.account.env:default}') String defaultEnv,
+                                    @Value('${default.account.env:default}') String defaultAccountName,
                                     CatsModule catsModule) {
     if (!credentialsConfig.accounts && !credentialsConfig.defaultAssumeRole) {
-      credentialsConfig.accounts = [new CredentialsConfig.Account(name: defaultEnv)]
+      credentialsConfig.accounts = [new CredentialsConfig.Account(name: defaultAccountName)]
       if (!credentialsConfig.defaultRegions) {
         credentialsConfig.defaultRegions = [US_EAST_1, US_WEST_1, US_WEST_2, EU_WEST_1].collect { new CredentialsConfig.Region(name: it.name) }
       }

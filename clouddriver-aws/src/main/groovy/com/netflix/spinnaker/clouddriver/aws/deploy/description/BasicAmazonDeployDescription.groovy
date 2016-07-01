@@ -37,7 +37,7 @@ class BasicAmazonDeployDescription extends AbstractAmazonCredentialsDescription 
   Integer healthCheckGracePeriod
   String healthCheckType
   String spotPrice
-  Collection<String> suspendedProcesses = []
+  Set<String> suspendedProcesses = []
   Collection<String> terminationPolicies
   String kernelId
   String ramdiskId
@@ -70,9 +70,9 @@ class BasicAmazonDeployDescription extends AbstractAmazonCredentialsDescription 
 
   @Canonical
   static class Capacity {
-    int min
-    int max
-    int desired
+    Integer min
+    Integer max
+    Integer desired
   }
 
   @Canonical

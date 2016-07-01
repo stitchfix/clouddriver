@@ -14,16 +14,18 @@
 * limitations under the License.
 */
 
-package com.netflix.spinnaker.clouddriver.openstack.deploy.description
+package com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup
 
 import groovy.transform.Canonical
 
 class CloneOpenstackAtomicOperationDescription extends DeployOpenstackAtomicOperationDescription {
   OpenstackCloneSource source
+
+  @Canonical
+  static class OpenstackCloneSource {
+    String serverGroupName
+    String region
+  }
+
 }
 
-@Canonical
-class OpenstackCloneSource {
-  String stackName
-  String region
-}

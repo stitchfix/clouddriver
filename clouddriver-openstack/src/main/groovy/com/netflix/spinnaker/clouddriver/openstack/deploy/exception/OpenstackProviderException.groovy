@@ -22,6 +22,6 @@ import org.openstack4j.model.common.ActionResponse
 @InheritConstructors
 class OpenstackProviderException extends RuntimeException {
   OpenstackProviderException(ActionResponse actionResponse) {
-    super("Operation failed: fault $actionResponse.fault with code $actionResponse.code")
+    super("Action request failed with fault $actionResponse.fault and code $actionResponse.code")
   }
 }

@@ -16,22 +16,36 @@
 
 package com.netflix.spinnaker.clouddriver.openstack.client
 
-import com.netflix.spinnaker.clouddriver.openstack.deploy.description.securitygroup.UpsertOpenstackSecurityGroupDescription
-import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackOperationException
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackProviderException
-import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
+import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackResourceNotFoundException
+import com.netflix.spinnaker.clouddriver.openstack.domain.LoadBalancerPool
+import com.netflix.spinnaker.clouddriver.openstack.domain.PoolHealthMonitor
+import com.netflix.spinnaker.clouddriver.openstack.domain.ServerGroupParameters
+import com.netflix.spinnaker.clouddriver.openstack.domain.VirtualIP
 import org.apache.commons.lang.StringUtils
 import org.openstack4j.api.Builders
 import org.openstack4j.api.OSClient
 import org.openstack4j.api.networking.ext.LoadBalancerService
 import org.openstack4j.model.common.ActionResponse
+import org.openstack4j.model.compute.FloatingIP
 import org.openstack4j.model.compute.IPProtocol
 import org.openstack4j.model.compute.RebootType
 import org.openstack4j.model.compute.SecGroupExtension
 import org.openstack4j.model.compute.Server
+import org.openstack4j.model.heat.Resource
 import org.openstack4j.model.heat.Stack
+import org.openstack4j.model.heat.StackCreate
+import org.openstack4j.model.heat.StackUpdate
+import org.openstack4j.model.network.NetFloatingIP
+import org.openstack4j.model.network.Port
+import org.openstack4j.model.network.Subnet
+import org.openstack4j.model.network.ext.HealthMonitor
+import org.openstack4j.model.network.ext.HealthMonitorType
+import org.openstack4j.model.network.ext.LbMethod
 import org.openstack4j.model.network.ext.LbPool
 import org.openstack4j.model.network.ext.Member
+import org.openstack4j.model.network.ext.Protocol
+import org.openstack4j.model.network.ext.Vip
 
 import java.lang.reflect.UndeclaredThrowableException
 import java.util.regex.Matcher
@@ -42,9 +56,6 @@ import java.util.regex.Pattern
  *
  * TODO use OpenstackProviderException here instead of OpenstackOperationException.
  * Use of OpenstackOperationException belongs in Operation classes.
- *
- * TODO handleRequest should be refactored to remove the operation parameter, as client calls
- * made here do not necessarily pertain to operations.
  *
  * TODO region support will need to be added to all client calls not already using regions
  *
@@ -58,12 +69,35 @@ abstract class OpenstackClientProvider {
   final Pattern lbDescriptionPattern = Pattern.compile(lbDescriptionRegex)
 
   /**
+   * Returns a list of instances in a given region.
+   * @param region
+   * @return
+   */
+  List<? extends Server> getInstances(String region) {
+    handleRequest {
+      getRegionClient(region).compute().servers().list()
+    }
+  }
+
+  /**
+   * Returns all of the console output for a given server and region.
+   * @param region
+   * @param serverId
+   * @return
+   */
+  String getConsoleOutput(String region, String serverId) {
+    handleRequest {
+      getRegionClient(region).compute().servers().getConsoleOutput(serverId, -1)
+    }
+  }
+
+  /**
    * Delete an instance.
    * @param instanceId
    * @return
    */
   void deleteInstance(String instanceId) {
-    handleRequest(AtomicOperations.TERMINATE_INSTANCES) {
+    handleRequest {
       client.compute().servers().delete(instanceId)
     }
   }
@@ -74,89 +108,429 @@ abstract class OpenstackClientProvider {
    * @return
    */
   void rebootInstance(String instanceId, RebootType rebootType = RebootType.SOFT) {
-    handleRequest(AtomicOperations.REBOOT_INSTANCES) {
+    handleRequest {
       client.compute().servers().reboot(instanceId, rebootType)
     }
   }
 
   /**
-   * Create or update a security group, applying a list of rules. If the securityGroupId is provided, updates an existing
-   * security group, else creates a new security group.
-   *
-   * Note: 2 default egress rules are created when creating a new security group
-   * automatically with remote IP prefixes 0.0.0.0/0 and ::/0.
-   *
-   * @param securityGroupId id of an existing security group to update
-   * @param securityGroupName name security group
-   * @param description description of the security group
-   * @param rules list of rules for the security group
+   * Get all Load Balancer Pools for region
+   * @param region
+   * @return List < ? extends LbPool >
    */
-  void upsertSecurityGroup(String securityGroupId, String securityGroupName, String description, List<UpsertOpenstackSecurityGroupDescription.Rule> rules) {
+  List<? extends LbPool> getAllLoadBalancerPools(final String region) {
+    List<? extends LbPool> pools = handleRequest {
+      getRegionClient(region).networking().loadbalancers().lbPool().list()
+    }
+    pools
+  }
 
-    handleRequest(AtomicOperations.UPSERT_SECURITY_GROUP) {
+  /**
+   * Gets load balancer pool for a given region by load balancer UUID.
+   * @param region
+   * @param loadBalancerId
+   * @return
+   */
+  LbPool getLoadBalancerPool(final String region, final String loadBalancerId) {
+    LbPool result = handleRequest {
+      getRegionClient(region).networking().loadbalancers().lbPool().get(loadBalancerId)
+    }
+    if (!result) {
+      throw new OpenstackProviderException("Unable to find load balancer ${loadBalancerId} in ${region}")
+    }
+    result
+  }
 
-      // The call to getClient reauthentictes via a token, so grab once for this method to avoid unnecessary reauthentications
-      def securityGroupsApi = client.compute().securityGroups()
+  /**
+   * Gets VIP for a given region.
+   * @param region
+   * @param vipId
+   * @return
+   */
+  Vip getVip(final String region, final String vipId) {
+    Vip result = handleRequest {
+      getRegionClient(region).networking().loadbalancers().vip().get(vipId)
+    }
+    if (!result) {
+      throw new OpenstackProviderException("Unable to find vip ${vipId} in ${region}")
+    }
+    result
+  }
 
-      // Try getting existing security group, update if needed
-      SecGroupExtension securityGroup
-      if (StringUtils.isNotEmpty(securityGroupId)) {
-        securityGroup = securityGroupsApi.get(securityGroupId)
+  /**
+   * Validates the subnet in a region.
+   * @param region
+   * @param subnetId
+   * @return boolean
+   */
+  boolean validateSubnetId(final String region, final String subnetId) {
+    handleRequest {
+      getRegionClient(region).networking().subnet().get(subnetId) != null
+    }
+  }
+
+  /**
+   * Creates load balancer pool in provided region.
+   * @param region
+   * @param loadBalancerPool
+   * @return LbPool
+   */
+  LbPool createLoadBalancerPool(final String region, final LoadBalancerPool loadBalancerPool) {
+    handleRequest {
+      getRegionClient(region).networking().loadbalancers().lbPool().create(
+        Builders.lbPool()
+          .name(loadBalancerPool.derivedName)
+          .protocol(Protocol.forValue(loadBalancerPool.protocol?.name()))
+          .lbMethod(LbMethod.forValue(loadBalancerPool.method?.name()))
+          .subnetId(loadBalancerPool.subnetId)
+          .description(loadBalancerPool.description)
+          .adminStateUp(Boolean.TRUE)
+          .build())
+    }
+  }
+
+  /**
+   * Updates existing load balancer pool's name or load balancer method.
+   * @param region
+   * @param loadBalancerPool
+   * @return
+   */
+  LbPool updateLoadBalancerPool(final String region, final LoadBalancerPool loadBalancerPool) {
+    handleRequest {
+      getRegionClient(region).networking().loadbalancers().lbPool().update(loadBalancerPool.id,
+        Builders.lbPoolUpdate()
+          .name(loadBalancerPool.derivedName)
+          .lbMethod(LbMethod.forValue(loadBalancerPool.method?.name()))
+          .description(loadBalancerPool.description)
+          .adminStateUp(Boolean.TRUE)
+          .build())
+    }
+  }
+
+  /**
+   * Creates VIP for given region and pool.
+   * @param region
+   * @param virtualIP
+   * @return
+   */
+  Vip createVip(final String region, final VirtualIP virtualIP) {
+    handleRequest {
+      getRegionClient(region).networking().loadbalancers().vip().create(
+        Builders.vip()
+          .name(virtualIP.derivedName)
+          .subnetId(virtualIP.subnetId)
+          .poolId(virtualIP.poolId)
+          .protocol(Protocol.forValue(virtualIP.protocol?.name()))
+          .protocolPort(virtualIP.port)
+          .adminStateUp(Boolean.TRUE)
+          .build())
+    }
+  }
+
+  /**
+   * Updates VIP in specified region.
+   * @param region
+   * @param virtualIP
+   * @return
+   */
+  Vip updateVip(final String region, final VirtualIP virtualIP) {
+    handleRequest {
+      // TODO - Currently only supporting updates to name ... Expanded to update SessionPersistence & connectionLimit
+      getRegionClient(region).networking().loadbalancers().vip().update(virtualIP.id,
+        Builders.vipUpdate().name(virtualIP.derivedName).adminStateUp(Boolean.TRUE).build())
+    }
+  }
+
+  /**
+   * Gets HealthMonitor for given region and id.
+   * @param region
+   * @param healthMonitorId
+   * @return
+   */
+  HealthMonitor getHealthMonitor(final String region, final String healthMonitorId) {
+    HealthMonitor result = handleRequest {
+      getRegionClient(region).networking().loadbalancers().healthMonitor().get(healthMonitorId)
+    }
+    if (!result) {
+      throw new OpenstackProviderException("Unable to find health monitor with ${healthMonitorId} in ${region}")
+    }
+    result
+  }
+
+  /**
+   * Creates health check for given pool in specified region.
+   * @param region
+   * @param lbPoolId
+   * @param monitor
+   * @return
+   */
+  HealthMonitor createHealthCheckForPool(final String region, final String lbPoolId, final PoolHealthMonitor monitor) {
+    LoadBalancerService loadBalancerService = getRegionClient(region).networking().loadbalancers()
+    HealthMonitor result = handleRequest {
+      loadBalancerService.healthMonitor().create(
+        Builders.healthMonitor()
+          .type(HealthMonitorType.forValue(monitor.type?.name()))
+          .delay(monitor.delay)
+          .timeout(monitor.timeout)
+          .maxRetries(monitor.maxRetries)
+          .httpMethod(monitor.httpMethod)
+          .urlPath(monitor.url)
+          .expectedCodes(monitor.expectedHttpStatusCodes?.join(','))
+          .adminStateUp(Boolean.TRUE)
+          .build())
+    }
+
+    // Check that the health monitor was created successfully or throw exception
+    if (!result) {
+      throw new OpenstackProviderException("Unable to create health check for pool ${lbPoolId}")
+    } else {
+      result = handleRequest {
+        loadBalancerService.lbPool().associateHealthMonitor(lbPoolId, result.id)
       }
-      if (securityGroup == null) {
-        securityGroup = securityGroupsApi.create(securityGroupName, description)
-      } else {
-        securityGroup = securityGroupsApi.update(securityGroup.id, securityGroupName, description)
-      }
+    }
+    result
+  }
 
-      // TODO: Find the different between existing rules and only apply that instead of deleting and re-creating all the rules
-      securityGroup.rules.each { rule ->
-        securityGroupsApi.deleteRule(rule.id)
-      }
+  /**
+   * Updates health monitor for a given region.
+   * @param region
+   * @param monitor
+   * @return
+   */
+  HealthMonitor updateHealthMonitor(final String region, final PoolHealthMonitor monitor) {
+    handleRequest {
+      getRegionClient(region).networking().loadbalancers().healthMonitor().update(monitor.id,
+        Builders.healthMonitorUpdate()
+          .delay(monitor.delay)
+          .timeout(monitor.timeout)
+          .maxRetries(monitor.maxRetries)
+          .httpMethod(monitor.httpMethod)
+          .urlPath(monitor.url)
+          .expectedCodes(monitor.expectedHttpStatusCodes?.join(','))
+          .adminStateUp(Boolean.TRUE)
+          .build())
+    }
+  }
 
-      rules.each { rule ->
-        securityGroupsApi.createRule(Builders.secGroupRule()
-          .parentGroupId(securityGroup.id)
-          .protocol(IPProtocol.valueOf(rule.ruleType))
-          .cidr(rule.cidr)
-          .range(rule.fromPort, rule.toPort).build())
+  /**
+   * Disassociates and removes health monitor from load balancer.
+   * @param region
+   * @param lbPoolId
+   * @param healthMonitorId
+   */
+  void disassociateAndRemoveHealthMonitor(String region, String lbPoolId, String healthMonitorId) {
+    disassociateHealthMonitor(region, lbPoolId, healthMonitorId)
+    deleteHealthMonitor(region, healthMonitorId)
+  }
+
+  /**
+   * Deletes a health monitor.
+   * @param region
+   * @param healthMonitorId
+   * @return
+   */
+  ActionResponse deleteHealthMonitor(String region, String healthMonitorId) {
+    handleRequest {
+      getRegionClient(region).networking().loadbalancers().healthMonitor().delete(healthMonitorId)
+    }
+  }
+
+  /**
+   * Disassociates health monitor from loadbalancer pool.
+   * @param region
+   * @param lbPoolId
+   * @param healMonitorId
+   */
+  ActionResponse disassociateHealthMonitor(String region, String lbPoolId, String healthMonitorId) {
+    handleRequest {
+      getRegionClient(region).networking().loadbalancers().lbPool().disAssociateHealthMonitor(lbPoolId, healthMonitorId)
+    }
+  }
+
+  /**
+   * Associate already known floating IP address to VIP in specified region.
+   * @param region
+   * @param floatingIpId
+   * @param vipId
+   * @return
+   */
+  NetFloatingIP associateFloatingIpToVip(final String region, final String floatingIpId, final String vipId) {
+    Port port = getPortForVip(region, vipId)
+    if (!port) {
+      throw new OpenstackProviderException("Unable to find port for vip ${vipId}")
+    } else {
+      handleRequest {
+        getRegionClient(region).networking().floatingip().associateToPort(floatingIpId, port.id)
       }
     }
   }
 
   /**
-   * Create a Spinnaker Server Group (Openstack Heat Stack).
-   * @param stackName
-   * @param heatTemplate
-   * @param parameters
-   * @param disableRollback
-   * @param timeoutMins
+   * Remove port associated with floating IP.
+   * @param region
+   * @param floatingIpId
    * @return
    */
-  void deploy(String stackName, String heatTemplate, Map<String, String> parameters, boolean disableRollback, Long timeoutMins) {
-    try {
-      client.heat().stacks().create(stackName, heatTemplate, parameters, disableRollback, timeoutMins)
-    } catch (Exception e) {
-      throw new OpenstackOperationException(AtomicOperations.CREATE_SERVER_GROUP, e)
+  NetFloatingIP disassociateFloatingIp(final String region, final String floatingIpId) {
+    handleRequest {
+      getRegionClient(region).networking().floatingip().disassociateFromPort(floatingIpId)
     }
-    //TODO: Handle heat autoscaling migration to senlin in versions > Mitaka
   }
 
-  /***
-   * Get a Spinnaker Server Group (Openstack Heat Stack).
+  /**
+   * Looks up the port associated by vip and uses the deviceId to get the attached floatingIp.
    * @param region
-   * @param stackName
+   * @param vipId
+   * @return
    */
-  Stack getServerGroup(String region, String stackName) {
-    try {
-      def stack = client.useRegion(region).heat().stacks().getStackByName(stackName)
-      return stack
-    } catch (Exception e) {
-      throw new OpenstackOperationException(e)
+  FloatingIP getAssociatedFloatingIp(final String region, final String vipId) {
+    Port port = getPortForVip(region, vipId)
+    if (!port) {
+      throw new OpenstackProviderException("Unable to find port for vip ${vipId}")
+    } else {
+      handleRequest {
+        getRegionClient(region).compute().floatingIps().list()?.find { it.instanceId == port.deviceId }
+      }
     }
   }
 
-  /***
+  /**
+   * Internal helper to look up port associated to vip.
+   * @param region
+   * @param vipId
+   * @return
+   */
+  protected Port getPortForVip(final String region, final String vipId) {
+    handleRequest {
+      getRegionClient(region).networking().port().list()?.find { it.name == "vip-${vipId}" }
+    }
+  }
+
+  /**
+   * Deletes a security group rule
+   * @param region the region to delete the rule from
+   * @param id id of the rule to delete
+   */
+  void deleteSecurityGroupRule(String region, String id) {
+    handleRequest {
+      client.useRegion(region).compute().securityGroups().deleteRule(id)
+    }
+  }
+
+  /**
+   * Creates a security group rule.
+   * @param region the region to create the rule in
+   * @param securityGroupId id of the security group which this rule belongs to
+   * @param protocol the protocol of the rule
+   * @param cidr the cidr for the rule
+   * @param fromPort the fromPort for the rule
+   * @param toPort the toPort for the rule
+   * @return the created rule
+   */
+  SecGroupExtension.Rule createSecurityGroupRule(String region, String securityGroupId, IPProtocol protocol, String cidr, int fromPort, int toPort) {
+    handleRequest {
+      client.useRegion(region).compute().securityGroups().createRule(Builders.secGroupRule()
+        .parentGroupId(securityGroupId)
+        .protocol(protocol)
+        .cidr(cidr)
+        .range(fromPort, toPort)
+        .build())
+    }
+  }
+
+  /**
+   * Updates a security group with the new name and description
+   * @param region the region the security group is in
+   * @param id the id of the security group to update
+   * @param name the new name for the security group
+   * @param description the new description for the security group
+   * @return the updated security group
+   */
+  SecGroupExtension updateSecurityGroup(String region, String id, String name, String description) {
+    handleRequest {
+      client.useRegion(region).compute().securityGroups().update(id, name, description)
+    }
+  }
+
+  /**
+   * Creates a security group with the given name and description
+   * @return the created security group
+   */
+  SecGroupExtension createSecurityGroup(String region, String name, String description) {
+    handleRequest {
+      client.useRegion(region).compute().securityGroups().create(name, description)
+    }
+  }
+
+  /**
+   * Returns the security group for the given id.
+   * @param region the region to look up the security group in
+   * @param id id of the security group.
+   */
+  SecGroupExtension getSecurityGroup(String region, String id) {
+    SecGroupExtension securityGroup = handleRequest {
+      client.useRegion(region).compute().securityGroups().get(id)
+    }
+    if (!securityGroup) {
+      throw new OpenstackResourceNotFoundException("Unable to find security group ${id}")
+    }
+    securityGroup
+  }
+
+  /**
+   * Returns the list of all security groups for the given region
+   */
+  List<SecGroupExtension> getSecurityGroups(String region) {
+    handleRequest {
+      getRegionClient(region).compute().securityGroups().list()
+    }
+  }
+
+  /**
+   * TODO: Handle heat autoscaling migration to senlin in versions > Mitaka
+   * Create a Spinnaker Server Group (Openstack Heat Stack).
+   * @param region the openstack region
+   * @param stackName the openstack stack name
+   * @param template the main heat template
+   * @param subtemplate a map of subtemplate files references by the template
+   * @param parameters the parameters substituted into the heat template
+   * @param disableRollback if true, resources are not removed upon stack create failure
+   * @param timeoutMins stack create timeout, after which the operation will fail
+   */
+  void deploy(String region, String stackName, String template, Map<String, String> subtemplate, ServerGroupParameters parameters, boolean disableRollback, Long timeoutMins) {
+    handleRequest {
+      Map<String, String> params = parameters.toParamsMap()
+      StackCreate create = Builders.stack()
+        .name(stackName)
+        .template(template)
+        .parameters(params)
+        .files(subtemplate)
+        .disableRollback(disableRollback)
+        .timeoutMins(timeoutMins)
+        .build()
+      getRegionClient(region).heat().stacks().create(create)
+    }
+  }
+
+  /**
+   * TODO: Handle heat autoscaling migration to senlin in versions > Mitaka
+   * Updates a Spinnaker Server Group (Openstack Heat Stack).
+   * @param region the openstack region
+   * @param stackName the openstack stack name
+   * @param stackId the openstack stack id
+   * @param template the main heat template
+   * @param subtemplate a map of subtemplate files references by the template
+   * @param parameters the parameters substituted into the heat template
+   */
+  void updateStack(String region, String stackName, String stackId, String template, Map<String, String> subtemplate, ServerGroupParameters parameters) {
+    handleRequest {
+      Map<String, String> params = parameters.toParamsMap()
+      StackUpdate update = Builders.stackUpdate().template(template).files(subtemplate).parameters(params).build()
+      getRegionClient(region).heat().stacks().update(stackName, stackId, update)
+    }
+  }
+
+  /**
    * Get a heat template from an existing Openstack Heat Stack
    * @param region
    * @param stackName
@@ -164,11 +538,8 @@ abstract class OpenstackClientProvider {
    * @return
    */
   String getHeatTemplate(String region, String stackName, String stackId) {
-    try {
-      def template = client.useRegion(region).heat().templates().getTemplateAsString(stackName, stackId)
-      return template
-    } catch (Exception e) {
-      throw new OpenstackOperationException(e)
+    handleRequest {
+      client.useRegion(region).heat().templates().getTemplateAsString(stackName, stackId)
     }
   }
 
@@ -176,14 +547,50 @@ abstract class OpenstackClientProvider {
    * List existing heat stacks (server groups)
    * @return List < ? extends Stack >  stacks
    */
-  List<? extends Stack> listStacks() {
-    def stacks
-    try {
-      stacks = client.heat().stacks().list()
-    } catch (Exception e) {
-      throw new OpenstackOperationException(e)
+  List<? extends Stack> listStacks(String region) {
+    handleRequest {
+      getRegionClient(region).heat().stacks().list()
     }
-    stacks
+  }
+
+  /**
+   * Get a stack in a specific region.
+   * @param stackName
+   * @return
+   */
+  Stack getStack(String region, String stackName) {
+    Stack stack = handleRequest {
+      client.useRegion(region).heat().stacks().getStackByName(stackName)
+    }
+    if (!stack) {
+      throw new OpenstackProviderException("Unable to find stack $stackName in region $region")
+    }
+    stack
+  }
+
+  /**
+   * Delete a stack in a specific region.
+   * @param stack
+   */
+  void destroy(String region, Stack stack) {
+    handleRequest {
+      client.useRegion(region).heat().stacks().delete(stack.name, stack.id)
+    }
+  }
+
+  /**
+   * Get all instance ids of server resources associated with a stack.
+   * @param region
+   * @param stackName
+   */
+  List<String> getInstanceIdsForStack(String region, String stackName) {
+    List<? extends Resource> resources = handleRequest {
+      getRegionClient(region).heat().resources().list(stackName)
+    }
+    List<String> ids = resources.findResults {
+      it.type == "OS::Nova::Server" ? it.physicalResourceId : null
+    }
+    ids
   }
 
   /**
@@ -227,24 +634,6 @@ abstract class OpenstackClientProvider {
   }
 
   /**
-   * Get the load balanacer pool associated with the id.
-   * @param lbPoolId
-   * @return
-   */
-  LbPool getLoadBalancerPool(String region, String lbPoolId) {
-    LbPool pool = null
-    try {
-      pool = client.useRegion(region).networking().loadbalancers().lbPool().get(lbPoolId)
-    } catch (Exception e) {
-      throw new OpenstackProviderException("Unable to find load balancer ${lbPoolId}", e)
-    }
-    if (pool == null) {
-      throw new OpenstackProviderException("Unable to find load balancer ${lbPoolId}")
-    }
-    pool
-  }
-
-  /**
    *
    * @param ip
    * @param lbPoolId
@@ -252,14 +641,15 @@ abstract class OpenstackClientProvider {
    * @param weight
    */
   Member addMemberToLoadBalancerPool(String region, String ip, String lbPoolId, int internalPort, int weight) {
-    //TODO use handleRequest once that is refactored
-    try {
+    Member member = handleRequest {
       client.useRegion(region).networking().loadbalancers().member().create(
         Builders.member().address(ip).poolId(lbPoolId).protocolPort(internalPort).weight(weight).build()
       )
-    } catch (Exception e) {
-      throw new OpenstackProviderException("Unable to add ip $ip to load balancer ${lbPoolId}", e)
     }
+    if (!member) {
+      throw new OpenstackProviderException("Unable to add ip $ip to load balancer ${lbPoolId}")
+    }
+    member
   }
 
   /**
@@ -268,11 +658,8 @@ abstract class OpenstackClientProvider {
    * @return
    */
   ActionResponse removeMemberFromLoadBalancerPool(String region, String memberId) {
-    //TODO use handleRequest once that is refactored
-    try {
+    handleRequest {
       client.useRegion(region).networking().loadbalancers().member().delete(memberId)
-    } catch (Exception e) {
-      throw new OpenstackProviderException("Unable to remove load balancer member $memberId", e)
     }
   }
 
@@ -283,12 +670,8 @@ abstract class OpenstackClientProvider {
    * @param lbPool
    */
   String getMemberIdForInstance(String region, String ip, LbPool lbPool) {
-    //TODO use handleRequest once that is refactored
-    String memberId = ""
-    try {
-      memberId = client.useRegion(region).networking().loadbalancers().member().list()?.find { m -> m.address == ip }?.id
-    } catch (Exception e) {
-      throw new OpenstackProviderException("Failed to list load balancer members", e)
+    String memberId = handleRequest {
+      client.useRegion(region).networking().loadbalancers().member().list()?.find { m -> m.address == ip }?.id
     }
     if (StringUtils.isEmpty(memberId)) {
       throw new OpenstackProviderException("Instance with ip ${ip} is not associated with any load balancer memberships")
@@ -298,17 +681,17 @@ abstract class OpenstackClientProvider {
     }
     memberId
   }
-
   /**
    * Get a compute server based on id.
    * @param instanceId
    * @return
    */
   Server getServerInstance(String region, String instanceId) {
-    //TODO use handleRequest once that is refactored
-    Server server = client.useRegion(region).compute().servers().get(instanceId)
-    if (server == null) {
-      throw new OpenstackOperationException("Could not find server with id ${instanceId}")
+    Server server = handleRequest {
+      client.useRegion(region).compute().servers().get(instanceId)
+    }
+    if (!server) {
+      throw new OpenstackProviderException("Could not find server with id ${instanceId}")
     }
     server
   }
@@ -336,48 +719,26 @@ abstract class OpenstackClientProvider {
   }
 
   /**
-   * Disassociates and removes health monitor from load balancer.
-   * @param region
-   * @param lbPoolId
-   * @param healthMonitorId
-   */
-  void disassociateAndRemoveHealthMonitor(String region, String lbPoolId, String healthMonitorId) {
-    handleRequest {
-      LoadBalancerService loadBalancerService = getRegionClient(region).networking().loadbalancers()
-      loadBalancerService.lbPool().disAssociateHealthMonitor(lbPoolId, healthMonitorId)
-      loadBalancerService.healthMonitor().delete(healthMonitorId)
-    }
-  }
-
-  /**
    * Deletes a security group.
    *
    * @param region the region the security group is in
    * @param securityGroupId id of the security group
    */
   void deleteSecurityGroup(String region, String securityGroupId) {
-    handleRequest(AtomicOperations.DELETE_SECURITY_GROUP) {
+    handleRequest {
       client.useRegion(region).compute().securityGroups().delete(securityGroupId)
     }
   }
 
   /**
-   * Handler for an Openstack4J request with error common handling.
-   * @param operation to add context to error messages
-   * @param closure makes the needed Openstack4J request
-   * @return returns the result from the closure
+   * Returns a list of available subnets by region.
+   * @param region
+   * @return
    */
-  def handleRequest(String operation, Closure closure) {
-    def result
-    try {
-      result = closure()
-    } catch (Exception e) {
-      throw new OpenstackOperationException(operation, e)
+  List<Subnet> listSubnets(String region) {
+    handleRequest {
+      getRegionClient(region).networking().subnet().list()
     }
-    if (result instanceof ActionResponse && !result.isSuccess()) {
-      throw new OpenstackOperationException(result, operation)
-    }
-    result
   }
 
   /**
@@ -385,12 +746,14 @@ abstract class OpenstackClientProvider {
    * @param closure makes the needed Openstack4J request
    * @return returns the result from the closure
    */
-  def handleRequest(Closure closure) {
-    def result
+  static <T> T handleRequest(Closure<T> closure) {
+    T result
     try {
       result = closure()
-    } catch (UndeclaredThrowableException ute) {
-      throw new OpenstackProviderException('Unable to process request', ute.cause)
+    } catch (UndeclaredThrowableException e) {
+      throw new OpenstackProviderException('Unable to process request', e.cause)
+    } catch (OpenstackProviderException e) { //allows nested calls to handleRequest
+      throw e
     } catch (Exception e) {
       throw new OpenstackProviderException('Unable to process request', e)
     }
@@ -399,6 +762,12 @@ abstract class OpenstackClientProvider {
     }
     result
   }
+
+  /**
+   * Returns a list of regions.
+   * @return
+   */
+  abstract List<String> getAllRegions()
 
   /**
    * Thread-safe way to get client.
@@ -412,6 +781,11 @@ abstract class OpenstackClientProvider {
    */
   abstract String getTokenId()
 
+  /**
+   * Helper method to get region based thread-safe OS client.
+   * @param region
+   * @return
+   */
   OSClient getRegionClient(String region) {
     client.useRegion(region)
   }

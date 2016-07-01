@@ -23,4 +23,5 @@ import org.springframework.stereotype.Component
 @OpenstackOperation(AtomicOperations.REGISTER_INSTANCES_WITH_LOAD_BALANCER)
 @Component
 class RegisterOpenstackInstancesDescriptionValidator extends AbstractRegistrationOpenstackInstancesDescriptionValidator {
+  String context = "registerOpenstackRegistrationAtomicOperationDescription"
 }

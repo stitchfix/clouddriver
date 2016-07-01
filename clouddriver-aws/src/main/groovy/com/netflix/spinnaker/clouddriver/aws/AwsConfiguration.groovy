@@ -23,7 +23,10 @@ import com.netflix.awsobjectmapper.AmazonObjectMapper
 import com.netflix.spectator.aws.SpectatorMetricCollector
 import com.netflix.spinnaker.cats.agent.Agent
 import com.netflix.spinnaker.cats.provider.ProviderSynchronizerTypeWrapper
+
+import com.netflix.spinnaker.clouddriver.aws.agent.CleanupAlarmsAgent
 import com.netflix.spinnaker.clouddriver.aws.agent.CleanupDetachedInstancesAgent
+import com.netflix.spinnaker.clouddriver.aws.agent.ReconcileClassicLinkSecurityGroupsAgent
 import com.netflix.spinnaker.clouddriver.aws.bastion.BastionConfig
 import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.BasicAmazonDeployHandler
 import com.netflix.spinnaker.clouddriver.aws.deploy.userdata.LocalFileUserDataProvider
@@ -33,6 +36,7 @@ import com.netflix.spinnaker.clouddriver.aws.model.SecurityGroupLookupFactory
 import com.netflix.spinnaker.clouddriver.aws.provider.AwsCleanupProvider
 import com.netflix.spinnaker.clouddriver.aws.security.AWSProxy
 import com.netflix.spinnaker.clouddriver.aws.security.EddaTimeoutConfig
+import com.netflix.spinnaker.clouddriver.aws.security.EddaTimeoutConfig.Builder
 import com.netflix.spinnaker.clouddriver.aws.security.AmazonClientProvider
 import com.netflix.spinnaker.clouddriver.aws.security.AmazonCredentialsInitializer
 import com.netflix.spinnaker.clouddriver.aws.security.NetflixAmazonCredentials
@@ -79,6 +83,12 @@ class AwsConfiguration {
   @Value('${aws.client.maxConnectionsPerRoute:20}')
   int maxConnectionsPerRoute
 
+  @Value('${aws.cleanup.alarms.enabled:false}')
+  boolean alarmCleanupEnabled
+
+  @Value('${aws.cleanup.alarms.daysToKeep:90}')
+  int daysToKeepAlarms
+
   @Autowired
   SpectatorMetricCollector spectatorMetricCollector
 
@@ -91,12 +101,12 @@ class AwsConfiguration {
 
   @Bean
   @ConfigurationProperties('aws.edda')
-  EddaTimeoutConfig.Builder eddaTimeoutConfigBuilder() {
-    new EddaTimeoutConfig.Builder()
+  Builder eddaTimeoutConfigBuilder() {
+    return new Builder()
   }
 
   @Bean
-  EddaTimeoutConfig eddaTimeoutConfig(EddaTimeoutConfig.Builder eddaTimeoutConfigBuilder) {
+  EddaTimeoutConfig eddaTimeoutConfig(Builder eddaTimeoutConfigBuilder) {
     eddaTimeoutConfigBuilder.build()
   }
 
@@ -137,13 +147,29 @@ class AwsConfiguration {
     new DeployDefaults()
   }
 
-  static class DeployDefaults {
+  public static class DeployDefaults {
+    public static enum ReconcileMode {
+      NONE,
+      LOG,
+      MODIFY
+    }
     String iamRole
     String classicLinkSecurityGroupName
     boolean addAppGroupsToClassicLink = false
     int maxClassicLinkSecurityGroups = 5
     boolean addAppGroupToServerGroup = false
     int maxSecurityGroups = 5
+    ReconcileMode reconcileClassicLinkSecurityGroups = ReconcileMode.NONE
+    List<String> reconcileClassicLinkAccounts = []
+
+    boolean isReconcileClassicLinkAccount(NetflixAmazonCredentials credentials) {
+      if (reconcileClassicLinkSecurityGroups == ReconcileMode.NONE) {
+        return false
+      }
+      List<String> reconcileAccounts = reconcileClassicLinkAccounts ?: []
+      return reconcileAccounts.isEmpty() || reconcileAccounts.contains(credentials.getName());
+    }
+
   }
 
   @Bean
@@ -157,10 +183,11 @@ class AwsConfiguration {
   @Bean
   @DependsOn('netflixAmazonCredentials')
   AwsCleanupProvider awsOperationProvider(AmazonClientProvider amazonClientProvider,
-                                          AccountCredentialsRepository accountCredentialsRepository) {
+                                          AccountCredentialsRepository accountCredentialsRepository,
+                                          DeployDefaults deployDefaults) {
     def awsCleanupProvider = new AwsCleanupProvider(Collections.newSetFromMap(new ConcurrentHashMap<Agent, Boolean>()))
 
-    synchronizeAwsCleanupProvider(awsCleanupProvider, amazonClientProvider, accountCredentialsRepository)
+    synchronizeAwsCleanupProvider(awsCleanupProvider, amazonClientProvider, accountCredentialsRepository, deployDefaults)
 
     awsCleanupProvider
   }
@@ -190,47 +217,29 @@ class AwsConfiguration {
   @Bean
   AwsCleanupProviderSynchronizer synchronizeAwsCleanupProvider(AwsCleanupProvider awsCleanupProvider,
                                                                AmazonClientProvider amazonClientProvider,
-                                                               AccountCredentialsRepository accountCredentialsRepository) {
-    def allAccounts = ProviderUtils.buildThreadSafeSetOfAccounts(accountCredentialsRepository, NetflixAmazonCredentials)
+                                                               AccountCredentialsRepository accountCredentialsRepository,
+                                                               DeployDefaults deployDefaults) {
+    def scheduledAccounts = ProviderUtils.getScheduledAccounts(awsCleanupProvider)
+    Set<NetflixAmazonCredentials> allAccounts = ProviderUtils.buildThreadSafeSetOfAccounts(accountCredentialsRepository, NetflixAmazonCredentials)
 
-    if (awsCleanupProvider.agentScheduler) {
-      // If there is an agent scheduler, then this provider has been through the AgentController in the past.
-      synchronizeCleanupDetachedInstancesAgentAccounts(awsCleanupProvider, allAccounts)
-    } else {
-      awsCleanupProvider.agents.add(new CleanupDetachedInstancesAgent(amazonClientProvider, allAccounts))
+    List<Agent> newlyAddedAgents = []
+
+    allAccounts.each { account ->
+      if (!scheduledAccounts.contains(account)) {
+        account.regions.each { region ->
+          newlyAddedAgents << new ReconcileClassicLinkSecurityGroupsAgent(amazonClientProvider, account, region.name, deployDefaults)
+        }
+      }
     }
+
+    if (!awsCleanupProvider.agentScheduler) {
+      if (alarmCleanupEnabled) {
+        awsCleanupProvider.agents.add(new CleanupAlarmsAgent(amazonClientProvider, accountCredentialsRepository, daysToKeepAlarms))
+      }
+      awsCleanupProvider.agents.add(new CleanupDetachedInstancesAgent(amazonClientProvider, accountCredentialsRepository))
+    }
+    awsCleanupProvider.agents.addAll(newlyAddedAgents)
 
     new AwsCleanupProviderSynchronizer()
-  }
-
-  private void synchronizeCleanupDetachedInstancesAgentAccounts(AwsCleanupProvider awsCleanupProvider,
-                                                                Collection<NetflixAmazonCredentials> allAccounts) {
-    CleanupDetachedInstancesAgent cleanupDetachedInstancesAgent = awsCleanupProvider.agents.find { agent ->
-      agent instanceof CleanupDetachedInstancesAgent
-    }
-
-    if (cleanupDetachedInstancesAgent) {
-      def cleanupDetachedInstancesAccounts = cleanupDetachedInstancesAgent.accounts
-      def oldAccountNames = cleanupDetachedInstancesAccounts.collect { it.name }
-      def newAccountNames = allAccounts.collect { it.name }
-      def accountNamesToDelete = oldAccountNames - newAccountNames
-      def accountNamesToAdd = newAccountNames - oldAccountNames
-
-      accountNamesToDelete.each { accountNameToDelete ->
-        def accountToDelete = cleanupDetachedInstancesAccounts.find { it.name == accountNameToDelete }
-
-        if (accountToDelete) {
-          cleanupDetachedInstancesAccounts.remove(accountToDelete)
-        }
-      }
-
-      accountNamesToAdd.each { accountNameToAdd ->
-        def accountToAdd = allAccounts.find { it.name == accountNameToAdd }
-
-        if (accountToAdd) {
-          cleanupDetachedInstancesAccounts.add(accountToAdd)
-        }
-      }
-    }
   }
 }

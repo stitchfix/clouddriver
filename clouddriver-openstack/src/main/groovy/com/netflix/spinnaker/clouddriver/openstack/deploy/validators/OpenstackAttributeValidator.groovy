@@ -16,10 +16,13 @@
 
 package com.netflix.spinnaker.clouddriver.openstack.deploy.validators
 
+import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackClientProvider
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.securitygroup.UpsertOpenstackSecurityGroupDescription
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
 import org.apache.commons.net.util.SubnetUtils
+import org.springframework.http.HttpMethod
+import org.springframework.http.HttpStatus
 import org.springframework.validation.Errors
 
 import static UpsertOpenstackSecurityGroupDescription.Rule
@@ -76,6 +79,15 @@ class OpenstackAttributeValidator {
     result
   }
 
+  boolean validateNotNull(Object obj, String attribute) {
+    boolean  result = true
+    if (!obj) {
+      result = false
+      reject(attribute, 'null')
+    }
+    result
+  }
+
   boolean validateNotEmpty(Object value, String attribute) {
     def result
     if (value != "" && value != null && value != []) {
@@ -98,9 +110,9 @@ class OpenstackAttributeValidator {
     result
   }
 
-  boolean validateNonNegative(int value, String attribute) {
+  boolean validateNonNegative(Integer value, String attribute) {
     def result
-    if (value >= 0) {
+    if (value != null && value >= 0) {
       result = true
     } else {
       errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.negative")
@@ -109,9 +121,9 @@ class OpenstackAttributeValidator {
     result
   }
 
-  boolean validatePositive(int value, String attribute) {
+  boolean validatePositive(Integer value, String attribute) {
     def result
-    if (value > 0) {
+    if (value != null && value > 0) {
       result = true
     } else {
       errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notPositive")
@@ -120,14 +132,25 @@ class OpenstackAttributeValidator {
     result
   }
 
-  boolean validateHeatTemplate(String value, String attribute, AccountCredentialsProvider accountCredentialsProvider, String account) {
+  boolean validateGreaterThan(Integer subject, Integer other, String attribute) {
     def result
-    def credentials = accountCredentialsProvider.getCredentials(account)
-    def client = ((OpenstackCredentials)credentials.getCredentials()).getProvider().getClient()
-    if (client && client.heat().templates().validateTemplate(value).isValid()) {
+    if (subject != null && other != null && subject > other) {
       result = true
-    } else {
-      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notValidHeatTemplate")
+    }
+    else {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notGreaterThan")
+      result = false
+    }
+    result
+  }
+
+  boolean validateGreaterThanEqual(Integer subject, Integer other, String attribute) {
+    def result
+    if (subject != null && other != null && subject >= other) {
+      result = true
+    }
+    else {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notGreaterThan")
       result = false
     }
     result
@@ -222,13 +245,76 @@ class OpenstackAttributeValidator {
       validateByContainment(value, attribute, [Rule.RULE_TYPE_TCP])
   }
 
-  def validateServerGroupCloneSource(Object value, String attribute) {
-    if (!value) {
-      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.empty")
-      return false
-    } else {
-      return validateNotEmpty(value.stackName, attribute) && validateNotEmpty(value.region, attribute)
+  /**
+   * Validate integer is an HTTP status code
+   * @param value
+   * @param attribute
+   * @return
+   */
+  def validateHttpStatusCode(Integer value, String attribute) {
+    boolean result = validateNotEmpty(value, attribute)
+    if (result) {
+      try {
+        HttpStatus.valueOf(value)
+      } catch (IllegalArgumentException e) {
+        reject(attribute, 'invalid Http Status Code')
+        result = false
+      }
     }
+    result
+  }
+
+  /**
+   * Validate string is an HTTP method
+   * @param value
+   * @param attribute
+   * @return
+   */
+  def validateHttpMethod(String value, String attribute) {
+    boolean result = validateNotEmpty(value, attribute)
+    if (result) {
+      try {
+        HttpMethod.valueOf(value)
+      } catch (IllegalArgumentException e) {
+        reject(attribute, 'invalid Http Method')
+        result = false
+      }
+    }
+    result
+  }
+
+  /**
+   * Validate string is a URI
+   * @param value
+   * @param attribute
+   * @return
+   */
+  def validateURI(String value, String attribute) {
+    boolean result = validateNotEmpty(value, attribute)
+
+    try {
+      URI.create(value)
+    } catch (MalformedURLException | URISyntaxException | IllegalArgumentException e) {
+      result = false
+      reject(attribute, 'invalid URL')
+    }
+    result
+  }
+
+  /**
+   * Validate the region
+   * @param region
+   * @param credentials
+   * @return
+   */
+  def validateRegion(String region, OpenstackClientProvider provider) {
+    boolean result = validateNotEmpty(region, 'region')
+    if (result) {
+      result = provider?.allRegions?.contains(region)
+      if (!result) {
+        reject('region', 'invalid region')
+      }
+    }
+    result
   }
 }
-

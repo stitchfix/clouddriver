@@ -17,14 +17,12 @@
 
 package com.netflix.spinnaker.clouddriver.openstack.deploy.validators.securitygroup
 
-import com.netflix.spinnaker.clouddriver.deploy.DescriptionValidator
 import com.netflix.spinnaker.clouddriver.openstack.OpenstackOperation
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.securitygroup.UpsertOpenstackSecurityGroupDescription
 import com.netflix.spinnaker.clouddriver.openstack.deploy.validators.OpenstackAttributeValidator
+import com.netflix.spinnaker.clouddriver.openstack.deploy.validators.AbstractOpenstackDescriptionValidator
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
-import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
 import org.apache.commons.lang.StringUtils
-import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
 import org.springframework.validation.Errors
 
@@ -33,24 +31,21 @@ import org.springframework.validation.Errors
  */
 @OpenstackOperation(AtomicOperations.UPSERT_SECURITY_GROUP)
 @Component
-class UpsertOpenstackSecurityGroupDescriptionValidator extends DescriptionValidator<UpsertOpenstackSecurityGroupDescription> {
+class UpsertOpenstackSecurityGroupDescriptionValidator extends AbstractOpenstackDescriptionValidator<UpsertOpenstackSecurityGroupDescription> {
 
-  @Autowired
-  AccountCredentialsProvider accountCredentialsProvider
+  String context = "upsertOpenstackSecurityGroupAtomicOperationDescription"
 
   @Override
-  void validate(List priorDescriptions, UpsertOpenstackSecurityGroupDescription description, Errors errors) {
-    def validator = new OpenstackAttributeValidator("upsertOpenstackSecurityGroupAtomicOperationDescription", errors)
-    validator.validateCredentials(description.account, accountCredentialsProvider)
+  void validate(OpenstackAttributeValidator validator, List priorDescriptions, UpsertOpenstackSecurityGroupDescription description, Errors errors) {
     if (StringUtils.isNotEmpty(description.id)) {
-      validator.validateUUID(description.id, "id")
+      validator.validateUUID(description.id, 'id')
     }
     if (!description.rules.isEmpty()) {
       description.rules.each { r ->
-        validator.validateCIDR(r.cidr, "cidr")
-        validator.validatePort(r.fromPort, "fromPort")
-        validator.validatePort(r.toPort, "toPort")
-        validator.validateRuleType(r.ruleType, "ruleType")
+        validator.validateCIDR(r.cidr, 'cidr')
+        validator.validatePort(r.fromPort, 'fromPort')
+        validator.validatePort(r.toPort, 'toPort')
+        validator.validateRuleType(r.ruleType, 'ruleType')
       }
     }
   }
