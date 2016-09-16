@@ -28,6 +28,7 @@ import com.netflix.spinnaker.clouddriver.model.LoadBalancerProvider
 import io.fabric8.kubernetes.api.model.Pod
 import io.fabric8.kubernetes.api.model.ReplicationController
 import io.fabric8.kubernetes.api.model.Service
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
 
@@ -73,9 +74,9 @@ class KubernetesLoadBalancerProvider implements LoadBalancerProvider<KubernetesL
     def instanceMap = KubernetesProviderUtils.controllerToInstanceMap(objectMapper, instances)
 
     Map<String, KubernetesServerGroup> serverGroupMap = allServerGroups.collectEntries { serverGroupData ->
-      ReplicationController replicationController = objectMapper.convertValue(serverGroupData.attributes.replicationController, ReplicationController)
-      def parse = Keys.parse(serverGroupData.id)
-      [(serverGroupData.id): new KubernetesServerGroup(replicationController, instanceMap[(String)serverGroupData.attributes.name], parse.account)]
+      def ownedInstances = instanceMap[(String)serverGroupData.attributes.name]
+      def serverGroup = KubernetesProviderUtils.serverGroupFromCacheData(objectMapper, serverGroupData, ownedInstances)
+      return [(serverGroupData.id): serverGroup]
     }
 
     return loadBalancers.collect {
@@ -88,8 +89,12 @@ class KubernetesLoadBalancerProvider implements LoadBalancerProvider<KubernetesL
     Service service = objectMapper.convertValue(loadBalancerEntry.attributes.service, Service)
     List<KubernetesServerGroup> serverGroups = []
     List<String> securityGroups
-    loadBalancerEntry.relationships[Keys.Namespace.SERVER_GROUPS.ns]?.forEach {
-      serverGroups << serverGroupMap[it]
+    loadBalancerEntry.relationships[Keys.Namespace.SERVER_GROUPS.ns]?.forEach { String serverGroupKey ->
+      KubernetesServerGroup serverGroup = serverGroupMap[serverGroupKey]
+      if (serverGroup) {
+        serverGroups << serverGroup
+      }
+      return
     }
 
     securityGroups = KubernetesProviderUtils.resolveRelationshipData(cacheView, loadBalancerEntry, Keys.Namespace.SECURITY_GROUPS.ns).findResults { cacheData ->

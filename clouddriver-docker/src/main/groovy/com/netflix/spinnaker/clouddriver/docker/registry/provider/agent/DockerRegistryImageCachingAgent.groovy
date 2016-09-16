@@ -23,6 +23,7 @@ import com.netflix.spinnaker.clouddriver.docker.registry.api.v2.client.DockerReg
 import com.netflix.spinnaker.clouddriver.docker.registry.cache.DefaultCacheDataBuilder
 import com.netflix.spinnaker.clouddriver.docker.registry.cache.Keys
 import com.netflix.spinnaker.clouddriver.docker.registry.provider.DockerRegistryProvider
+import com.netflix.spinnaker.clouddriver.docker.registry.provider.DockerRegistryProviderUtils
 import com.netflix.spinnaker.clouddriver.docker.registry.security.DockerRegistryCredentials
 import groovy.util.logging.Slf4j
 import retrofit.RetrofitError
@@ -32,7 +33,8 @@ import static java.util.Collections.unmodifiableSet
 @Slf4j
 class DockerRegistryImageCachingAgent implements CachingAgent, AccountAware {
   static final Set<AgentDataType> types = unmodifiableSet([
-    AgentDataType.Authority.AUTHORITATIVE.forType(Keys.Namespace.TAGGED_IMAGE.ns)
+    AgentDataType.Authority.AUTHORITATIVE.forType(Keys.Namespace.TAGGED_IMAGE.ns),
+    AgentDataType.Authority.AUTHORITATIVE.forType(Keys.Namespace.IMAGE_ID.ns)
   ] as Set)
 
   private DockerRegistryCredentials credentials
@@ -40,16 +42,20 @@ class DockerRegistryImageCachingAgent implements CachingAgent, AccountAware {
   private String accountName
   private final int index
   private final int threadCount
+  private String registry
 
   DockerRegistryImageCachingAgent(DockerRegistryCloudProvider dockerRegistryCloudProvider,
                                   String accountName,
                                   DockerRegistryCredentials credentials,
-                                  int index, int threadCount) {
+                                  int index,
+                                  int threadCount,
+                                  String registry) {
     this.dockerRegistryCloudProvider = dockerRegistryCloudProvider
     this.accountName = accountName
     this.credentials = credentials
     this.index = index
     this.threadCount = threadCount
+    this.registry = registry
   }
 
   @Override
@@ -81,13 +87,13 @@ class DockerRegistryImageCachingAgent implements CachingAgent, AccountAware {
       if(credentials.skip?.contains(it)) {
           return [:]
       }
-      DockerRegistryTags tags
+      DockerRegistryTags tags = null
       try {
         tags = credentials.client.getTags(it)
       } catch (e) {
         log.error("Could not load tags for ${it}")
       }
-      tags ? [(tags.name): tags.tags ?: []] : [:]
+      tags?.tags && tags?.name ? [(tags.name): tags.tags] : [:]
     }
   }
 
@@ -100,10 +106,12 @@ class DockerRegistryImageCachingAgent implements CachingAgent, AccountAware {
     log.info("Describing items in ${agentType}")
 
     Map<String, DefaultCacheDataBuilder> cachedTags = DefaultCacheDataBuilder.defaultCacheDataBuilderMap()
+    Map<String, DefaultCacheDataBuilder> cachedIds = DefaultCacheDataBuilder.defaultCacheDataBuilderMap()
 
     tagMap.forEach { repository, tags ->
       tags.forEach { tag ->
         def tagKey = Keys.getTaggedImageKey(accountName, repository, tag)
+        def imageIdKey = Keys.getImageIdKey(DockerRegistryProviderUtils.imageId(registry, repository, tag))
         def digest = null
 
         if (credentials.trackDigests) {
@@ -116,9 +124,9 @@ class DockerRegistryImageCachingAgent implements CachingAgent, AccountAware {
               log.warn("Image manifest for $tagKey no longer available; tag will not be cached: $e.message")
               return
             } else {
-              // Could be intermittent error, not caching the tag here will cause spurious tag creation/deletion events
-              // when the error is resolved.
-              log.warn("Error retrieving manifest for $tagKey; digest will not be cached: $e.message")
+              // It is safe to not cache the tag here because igor now persists all the tags it has seen.
+              log.warn("Error retrieving manifest for $tagKey; digest and tag will not be cached: $e.message")
+              return
             }
           }
         }
@@ -128,15 +136,22 @@ class DockerRegistryImageCachingAgent implements CachingAgent, AccountAware {
           attributes.account = accountName
           attributes.digest = digest
         }
+
+        cachedIds[imageIdKey].with {
+          attributes.tagKey = tagKey
+          attributes.account = accountName
+        }
       }
 
       null
     }
 
     log.info("Caching ${cachedTags.size()} tagged images in ${agentType}")
+    log.info("Caching ${cachedIds.size()} image ids in ${agentType}")
 
     new DefaultCacheResult([
       (Keys.Namespace.TAGGED_IMAGE.ns): cachedTags.values().collect({ builder -> builder.build() }),
+      (Keys.Namespace.IMAGE_ID.ns): cachedIds.values().collect({ builder -> builder.build() }),
     ])
   }
 }

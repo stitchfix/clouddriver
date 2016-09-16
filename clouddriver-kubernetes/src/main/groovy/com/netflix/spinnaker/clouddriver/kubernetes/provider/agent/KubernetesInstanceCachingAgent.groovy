@@ -22,20 +22,19 @@ import com.netflix.spinnaker.cats.agent.*
 import com.netflix.spinnaker.cats.provider.ProviderCache
 import com.netflix.spinnaker.clouddriver.kubernetes.KubernetesCloudProvider
 import com.netflix.spinnaker.clouddriver.kubernetes.cache.Keys
-import com.netflix.spinnaker.clouddriver.kubernetes.deploy.KubernetesUtil
 import com.netflix.spinnaker.clouddriver.kubernetes.provider.KubernetesProvider
 import com.netflix.spinnaker.clouddriver.kubernetes.provider.view.MutableCacheData
 import com.netflix.spinnaker.clouddriver.kubernetes.security.KubernetesCredentials
 import groovy.util.logging.Slf4j
+import io.fabric8.kubernetes.api.model.Event
 import io.fabric8.kubernetes.api.model.Pod
 
 import static com.netflix.spinnaker.cats.agent.AgentDataType.Authority.AUTHORITATIVE
 
 @Slf4j
-class KubernetesInstanceCachingAgent implements  CachingAgent, AccountAware {
+class KubernetesInstanceCachingAgent implements CachingAgent, AccountAware {
   static final Set<AgentDataType> types = Collections.unmodifiableSet([
       AUTHORITATIVE.forType(Keys.Namespace.INSTANCES.ns),
-      AUTHORITATIVE.forType(Keys.Namespace.PROCESSES.ns),
   ] as Set)
 
   final KubernetesCloudProvider kubernetesCloudProvider
@@ -82,43 +81,33 @@ class KubernetesInstanceCachingAgent implements  CachingAgent, AccountAware {
     log.info("Describing items in ${agentType}")
 
     Map<String, MutableCacheData> cachedInstances = MutableCacheData.mutableCacheMap()
-    Map<String, MutableCacheData> cachedProcesses = MutableCacheData.mutableCacheMap()
+
+    def podEvents = [:]
+    try {
+      podEvents = credentials.apiAdaptor.getEvents(namespace, "Pod")
+    } catch (Exception e) {
+      log.warn "Failure fetching events for all pods in $namespace", e
+    }
 
     for (Pod pod : pods) {
       if (!pod) {
         continue
       }
 
-      // Not owned by spinnaker
-      if (!pod.metadata.labels) {
-        continue
-      }
+      def events = podEvents[pod.metadata.name] ?: []
 
-      def rc = pod.metadata.labels[KubernetesUtil.REPLICATION_CONTROLLER_LABEL] ?: ''
-      def job = pod.metadata.labels[KubernetesUtil.JOB_LABEL] ?: ''
-
-
-      if (job) {
-        def key = Keys.getProcessKey(accountName, namespace, job, pod.metadata.name)
-        cachedProcesses[key].with {
-          attributes.name = pod.metadata.name
-          attributes.pod = pod
-        }
-      } else {
-        def key = Keys.getInstanceKey(accountName, namespace, rc, pod.metadata.name)
-        cachedInstances[key].with {
-          attributes.name = pod.metadata.name
-          attributes.pod = pod
-        }
+      def key = Keys.getInstanceKey(accountName, namespace, pod.metadata.name)
+      cachedInstances[key].with {
+        attributes.name = pod.metadata.name
+        attributes.pod = pod
+        attributes.events = events
       }
     }
 
     log.info("Caching ${cachedInstances.size()} instances in ${agentType}")
-    log.info("Caching ${cachedProcesses.size()} processes in ${agentType}")
 
     new DefaultCacheResult([
         (Keys.Namespace.INSTANCES.ns): cachedInstances.values(),
-        (Keys.Namespace.PROCESSES.ns): cachedProcesses.values()
     ], [:])
   }
 

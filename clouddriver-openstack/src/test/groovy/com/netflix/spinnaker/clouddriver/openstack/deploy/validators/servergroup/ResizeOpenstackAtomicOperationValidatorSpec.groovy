@@ -19,7 +19,7 @@ package com.netflix.spinnaker.clouddriver.openstack.deploy.validators.servergrou
 import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackClientProvider
 import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackProviderFactory
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.DeployOpenstackAtomicOperationDescription
-import com.netflix.spinnaker.clouddriver.openstack.domain.ServerGroupParameters
+import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.ServerGroupParameters
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
@@ -47,13 +47,15 @@ class ResizeOpenstackAtomicOperationValidatorSpec extends Specification {
   String image = 'ubuntu-latest'
   int maxSize = 5
   int minSize = 3
-  String networkId = '1234'
-  String poolId = '5678'
+  int desiredSize = 4
+  String subnetId = '1234'
+  List<String> loadBalancerIds = ['5678']
   List<String> securityGroups = ['sg1']
 
   def setup() {
-    clientProvider = Mock(OpenstackClientProvider)
-    clientProvider.getProperty('allRegions') >> ['r1']
+    clientProvider = Mock(OpenstackClientProvider) {
+      getAllRegions() >> ['r1']
+    }
     GroovyMock(OpenstackProviderFactory, global: true)
     OpenstackProviderFactory.createProvider(credentials) >> clientProvider
     credz = new OpenstackCredentials(credentials)
@@ -69,7 +71,7 @@ class ResizeOpenstackAtomicOperationValidatorSpec extends Specification {
 
   def "Validate no error"() {
     given:
-    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: maxSize, minSize: minSize, networkId: networkId, poolId: poolId, securityGroups: securityGroups)
+    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: maxSize, minSize: minSize, desiredSize: desiredSize, subnetId: subnetId, loadBalancers: loadBalancerIds, securityGroups: securityGroups)
     DeployOpenstackAtomicOperationDescription description = new DeployOpenstackAtomicOperationDescription(account: account, application: application, region: region, stack: stack, freeFormDetails: freeFormDetails, disableRollback: disableRollback, timeoutMins: timeoutMins, serverGroupParameters: params, credentials: credz)
 
     when:
@@ -83,7 +85,7 @@ class ResizeOpenstackAtomicOperationValidatorSpec extends Specification {
   @Unroll
   def "Validate create missing required core field - #attribute"() {
     given:
-    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: maxSize, minSize: minSize, networkId: networkId, poolId: poolId, securityGroups: securityGroups)
+    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: maxSize, minSize: minSize, desiredSize: desiredSize, subnetId: subnetId, loadBalancers: loadBalancerIds, securityGroups: securityGroups)
     DeployOpenstackAtomicOperationDescription description = new DeployOpenstackAtomicOperationDescription(account: account, application: application, region: region, stack: stack, freeFormDetails: freeFormDetails, disableRollback: disableRollback, timeoutMins: timeoutMins, serverGroupParameters: params, credentials: credz)
     description."$attribute" = value
 
@@ -103,7 +105,7 @@ class ResizeOpenstackAtomicOperationValidatorSpec extends Specification {
   @Unroll
   def "Validate create missing required template field - #attribute"() {
     given:
-    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: maxSize, minSize: minSize, networkId: networkId, poolId: poolId, securityGroups: securityGroups)
+    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: maxSize, minSize: minSize, desiredSize: desiredSize, subnetId: subnetId, loadBalancers: loadBalancerIds, securityGroups: securityGroups)
     DeployOpenstackAtomicOperationDescription description = new DeployOpenstackAtomicOperationDescription(account: account, application: application, region: region, stack: stack, freeFormDetails: freeFormDetails, disableRollback: disableRollback, timeoutMins: timeoutMins, serverGroupParameters: params, credentials: credz)
     description.serverGroupParameters."$attribute" = null
 
@@ -118,22 +120,23 @@ class ResizeOpenstackAtomicOperationValidatorSpec extends Specification {
     'instanceType'   | 1
     'image'          | 1
     'maxSize'        | 2
-    'minSize'        | 2
-    'networkId'      | 1
-    'poolId'         | 1
+    'minSize'        | 3
+    'desiredSize'    | 2
+    'subnetId'       | 1
+    'loadBalancers'  | 1
     'securityGroups' | 1
   }
 
   def "Validate sizing - error"() {
     given:
-    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: -2, minSize: -1, networkId: networkId, poolId: poolId, securityGroups: securityGroups)
+    ServerGroupParameters params = new ServerGroupParameters(instanceType: instanceType, image:image, maxSize: -2, minSize: -1, desiredSize: -3, subnetId: subnetId, loadBalancers: loadBalancerIds, securityGroups: securityGroups)
     DeployOpenstackAtomicOperationDescription description = new DeployOpenstackAtomicOperationDescription(account: account, application: application, region: region, stack: stack, freeFormDetails: freeFormDetails, disableRollback: disableRollback, timeoutMins: timeoutMins, serverGroupParameters: params, credentials: credz)
 
     when:
     validator.validate([], description, errors)
 
     then:
-    3 * errors.rejectValue(_,_)
+    5 * errors.rejectValue(_,_)
   }
 
 }

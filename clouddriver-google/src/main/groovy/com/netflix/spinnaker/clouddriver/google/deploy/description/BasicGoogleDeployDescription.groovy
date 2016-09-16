@@ -17,6 +17,8 @@
 package com.netflix.spinnaker.clouddriver.google.deploy.description
 
 import com.netflix.spinnaker.clouddriver.deploy.DeployDescription
+import com.netflix.spinnaker.clouddriver.google.model.GoogleAutoscalingPolicy
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleHttpLoadBalancingPolicy
 import groovy.transform.AutoClone
 import groovy.transform.Canonical
 import groovy.transform.ToString
@@ -33,43 +35,29 @@ class BasicGoogleDeployDescription extends BaseGoogleInstanceDescription impleme
   Boolean regional
   String zone
   List<String> loadBalancers
+  Boolean disableTraffic
   Set<String> securityGroups
-  AutoscalingPolicy autoscalingPolicy
+  GoogleAutoscalingPolicy autoscalingPolicy
+  GoogleHttpLoadBalancingPolicy loadBalancingPolicy
+  AutoHealingPolicy autoHealingPolicy
+  // Capacity is optional. If it is specified, capacity.desired takes precedence over targetSize.
+  // If autoscalingPolicy is also specified, capacity.min and capacity.max take precedence over
+  // autoscalingPolicy.minNumReplicas and autoscalingPolicy.maxNumReplicas.
+  Capacity capacity
   Source source = new Source()
 
   @Canonical
   @ToString(includeNames = true)
-  static class AutoscalingPolicy {
-    int minNumReplicas = 2
-    int maxNumReplicas = 2
-    int coolDownPeriodSec = 60
+  static class AutoHealingPolicy {
+    String healthCheck
+    int initialDelaySec = 300
+  }
 
-    CpuUtilization cpuUtilization
-    LoadBalancingUtilization loadBalancingUtilization
-    List<CustomMetricUtilization> customMetricUtilizations
-
-    @ToString(includeNames = true)
-    static class CpuUtilization {
-      double utilizationTarget = 0.6
-    }
-
-    @ToString(includeNames = true)
-    static class LoadBalancingUtilization {
-      double utilizationTarget = 0.6
-    }
-
-    @ToString(includeNames = true)
-    static class CustomMetricUtilization {
-      String metric
-      double utilizationTarget
-      UtilizationTargetType utilizationTargetType = UtilizationTargetType.GAUGE
-
-      enum UtilizationTargetType {
-        GAUGE,
-        DELTA_PER_SECOND,
-        DELTA_PER_MINUTE;
-      }
-    }
+  @Canonical
+  static class Capacity {
+    Integer min
+    Integer max
+    Integer desired
   }
 
   @Canonical

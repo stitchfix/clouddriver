@@ -36,6 +36,8 @@ class TitusDeployDescription extends AbstractTitusCredentialsDescription impleme
   String entryPoint
   String iamProfile
   String user
+  Boolean inService
+  String jobType
 
   @Canonical
   static class Capacity {

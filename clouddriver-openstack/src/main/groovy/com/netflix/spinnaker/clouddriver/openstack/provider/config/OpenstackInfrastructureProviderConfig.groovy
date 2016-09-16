@@ -18,10 +18,17 @@ package com.netflix.spinnaker.clouddriver.openstack.provider.config
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.google.common.collect.Sets
+import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.cats.agent.CachingAgent
 import com.netflix.spinnaker.cats.provider.ProviderSynchronizerTypeWrapper
 import com.netflix.spinnaker.clouddriver.openstack.provider.OpenstackInfrastructureProvider
+import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackFloatingIPCachingAgent
+import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackImageCachingAgent
 import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackInstanceCachingAgent
+import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackInstanceTypeCachingAgent
+import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackLoadBalancerCachingAgent
+import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackNetworkCachingAgent
+import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackSecurityGroupCachingAgent
 import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackServerGroupCachingAgent
 import com.netflix.spinnaker.clouddriver.openstack.provider.agent.OpenstackSubnetCachingAgent
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackNamedAccountCredentials
@@ -34,7 +41,6 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.DependsOn
 import org.springframework.context.annotation.Scope
 
-
 @Configuration
 class OpenstackInfrastructureProviderConfig {
 
@@ -45,9 +51,10 @@ class OpenstackInfrastructureProviderConfig {
 
   @Bean
   @DependsOn('openstackNamedAccountCredentials')
-  OpenstackInfrastructureProvider openstackInfastructureProvider(AccountCredentialsRepository accountCredentialsRepository, @Qualifier('infraObjectMapper') ObjectMapper objectMapper) {
+  OpenstackInfrastructureProvider openstackInfastructureProvider(AccountCredentialsRepository accountCredentialsRepository,
+                                                                 @Qualifier('infraObjectMapper') ObjectMapper objectMapper, Registry registry) {
     OpenstackInfrastructureProvider provider = new OpenstackInfrastructureProvider(Sets.newConcurrentHashSet())
-    synchronizeOpenstackProvider(provider, accountCredentialsRepository, objectMapper)
+    synchronizeOpenstackProvider(provider, accountCredentialsRepository, objectMapper, registry)
     provider
   }
 
@@ -69,7 +76,8 @@ class OpenstackInfrastructureProviderConfig {
   @Bean
   OpenstackProviderSynchronizer synchronizeOpenstackProvider(OpenstackInfrastructureProvider openstackInfastructureProvider,
                                                              AccountCredentialsRepository accountCredentialsRepository,
-                                                             ObjectMapper objectMapper) {
+                                                             @Qualifier('infraObjectMapper') ObjectMapper objectMapper,
+                                                             Registry registry) {
     def scheduledAccounts = ProviderUtils.getScheduledAccounts(openstackInfastructureProvider)
     def allAccounts = ProviderUtils.buildThreadSafeSetOfAccounts(accountCredentialsRepository, OpenstackNamedAccountCredentials)
 
@@ -77,10 +85,16 @@ class OpenstackInfrastructureProviderConfig {
 
     allAccounts.each { OpenstackNamedAccountCredentials credentials ->
       if (!scheduledAccounts.contains(credentials.name)) {
-        credentials.regions.each { String region ->
+        credentials.credentials.provider.allRegions.each { String region ->
           newlyAddedAgents << new OpenstackInstanceCachingAgent(credentials, region, objectMapper)
-          newlyAddedAgents << new OpenstackServerGroupCachingAgent(credentials, region)
+          newlyAddedAgents << new OpenstackServerGroupCachingAgent(credentials, region, objectMapper, registry)
           newlyAddedAgents << new OpenstackSubnetCachingAgent(credentials, region, objectMapper)
+          newlyAddedAgents << new OpenstackNetworkCachingAgent(credentials, region, objectMapper)
+          newlyAddedAgents << new OpenstackImageCachingAgent(credentials, region, objectMapper)
+          newlyAddedAgents << new OpenstackSecurityGroupCachingAgent(credentials, region, objectMapper, registry)
+          newlyAddedAgents << new OpenstackFloatingIPCachingAgent(credentials, region, objectMapper)
+          newlyAddedAgents << new OpenstackLoadBalancerCachingAgent(credentials, region, objectMapper, registry)
+          newlyAddedAgents << new OpenstackInstanceTypeCachingAgent(credentials, region, objectMapper)
         }
       }
     }

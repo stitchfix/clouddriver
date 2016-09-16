@@ -21,7 +21,7 @@ import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
 import com.netflix.spinnaker.clouddriver.security.AbstractAtomicOperationsCredentialsSupport
 import com.netflix.spinnaker.clouddriver.titus.TitusClientProvider
 import com.netflix.spinnaker.clouddriver.titus.TitusOperation
-import com.netflix.spinnaker.clouddriver.titus.deploy.description.DisableTitusServerGroupDescription
+import com.netflix.spinnaker.clouddriver.titus.deploy.description.EnableDisableServerGroupDescription
 import com.netflix.spinnaker.clouddriver.titus.deploy.ops.DisableTitusServerGroupAtomicOperation
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
@@ -43,8 +43,8 @@ class DisableTitusServerGroupAtomicOperationConverter extends AbstractAtomicOper
   }
 
   @Override
-  DisableTitusServerGroupDescription convertDescription(Map input) {
-    def converted = objectMapper.convertValue(input, DisableTitusServerGroupDescription)
+  EnableDisableServerGroupDescription convertDescription(Map input) {
+    def converted = objectMapper.convertValue(input, EnableDisableServerGroupDescription)
     converted.credentials = getCredentialsObject(input.credentials as String)
     converted
   }

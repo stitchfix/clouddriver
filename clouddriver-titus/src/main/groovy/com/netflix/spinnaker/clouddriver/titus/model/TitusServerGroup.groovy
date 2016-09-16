@@ -22,7 +22,6 @@ import com.netflix.spinnaker.clouddriver.model.Instance
 import com.netflix.spinnaker.clouddriver.model.ServerGroup
 import com.netflix.spinnaker.clouddriver.titus.caching.Keys
 import com.netflix.spinnaker.clouddriver.titus.client.model.Job
-import com.netflix.spinnaker.clouddriver.titus.client.model.TaskState
 
 /**
  * Equivalent of a Titus {@link com.netflix.spinnaker.clouddriver.titus.client.model.Job}
@@ -38,6 +37,7 @@ class TitusServerGroup implements ServerGroup, Serializable {
   String entryPoint
   String iamProfile
   List<String> securityGroups
+  Set<TitusSecurityGroup> securityGroupDetails
   Map env
   Long submittedAt
   String application
@@ -71,8 +71,7 @@ class TitusServerGroup implements ServerGroup, Serializable {
     placement.region = region
     instances = job.tasks.findAll { it != null }.collect { new TitusInstance(job, it) } as Set
     capacity = new ServerGroup.Capacity(min: job.instancesMin, max: job.instancesMax, desired: job.instancesDesired)
-    //TODO(cfieber) - more of the 'disable is stop all the tasks' nonsense here:
-    disabled = job.tasks.every { it.state == TaskState.STOPPED }
+    disabled = !job.inService
     securityGroups = job.securityGroups
   }
 
@@ -97,7 +96,7 @@ class TitusServerGroup implements ServerGroup, Serializable {
   }
 
   @Override
-  Set<String> getSecurityGroups() {
+  Set<Map> getSecurityGroups() {
     securityGroups as Set
   }
 

@@ -16,6 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.titus.client
 
+import com.netflix.spectator.api.NoopRegistry
 import com.netflix.spinnaker.clouddriver.titus.client.model.Job
 import com.netflix.spinnaker.clouddriver.titus.client.model.ResizeJobRequest
 import com.netflix.spinnaker.clouddriver.titus.client.model.SubmitJobRequest
@@ -35,7 +36,7 @@ class RegionScopedTitusClientSpec extends Specification {
     TitusRegion titusRegion = new TitusRegion(
       "us-east-1", "test", "http://titusapi.mainvpc.us-east-1.dyntest.netflix.net:7101/"
     );
-    TitusClient titusClient = new RegionScopedTitusClient(titusRegion);
+    TitusClient titusClient = new RegionScopedTitusClient(titusRegion, new NoopRegistry());
 
     // ******************************************************************************************************************
 
@@ -70,7 +71,8 @@ class RegionScopedTitusClientSpec extends Specification {
       .withPorts([7001] as int[])
       .withEnv(env)
       .withLabels(labels)
-      .withAllocateIpAddress(true);
+      .withAllocateIpAddress(true)
+      .withInService(false);
 
     when:
     String jobId = titusClient.submitJob(submitJobRequest);

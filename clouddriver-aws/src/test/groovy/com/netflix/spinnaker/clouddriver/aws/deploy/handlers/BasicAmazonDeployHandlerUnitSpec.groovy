@@ -28,7 +28,20 @@ import com.amazonaws.services.ec2.model.DescribeImagesResult
 import com.amazonaws.services.ec2.model.DescribeVpcClassicLinkResult
 import com.amazonaws.services.ec2.model.Image
 import com.amazonaws.services.ec2.model.VpcClassicLink
+import com.amazonaws.services.elasticloadbalancing.AmazonElasticLoadBalancing as AmazonELBV1
+import com.amazonaws.services.elasticloadbalancing.model.DescribeLoadBalancersResult
+import com.amazonaws.services.elasticloadbalancing.model.LoadBalancerDescription
+import com.amazonaws.services.elasticloadbalancing.model.LoadBalancerNotFoundException as LBNFEV1
+import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancing
+import com.amazonaws.services.elasticloadbalancingv2.model.DescribeLoadBalancersResult as DescribeLBV2
+import com.amazonaws.services.elasticloadbalancingv2.model.DescribeTargetGroupsRequest
+import com.amazonaws.services.elasticloadbalancingv2.model.DescribeTargetGroupsResult
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancer
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancerNotFoundException
+import com.amazonaws.services.elasticloadbalancingv2.model.TargetGroup
+import com.google.common.util.concurrent.RateLimiter
 import com.netflix.spinnaker.clouddriver.aws.AwsConfiguration
+import com.netflix.spinnaker.clouddriver.aws.deploy.ops.loadbalancer.LoadBalancerLookupHelper
 import com.netflix.spinnaker.clouddriver.aws.security.NetflixAmazonCredentials
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
@@ -60,24 +73,32 @@ class BasicAmazonDeployHandlerUnitSpec extends Specification {
   @Shared
   Task task = Mock(Task)
 
-  AmazonEC2 amazonEC2
+  AmazonEC2 amazonEC2 = Mock(AmazonEC2)
+  AmazonElasticLoadBalancing elbV2 = Mock(AmazonElasticLoadBalancing)
+  AmazonELBV1 elbV1 = Mock(AmazonELBV1)
 
   List<AmazonBlockDevice> blockDevices
 
   def setup() {
-    amazonEC2 = Mock(AmazonEC2)
     amazonEC2.describeImages(_) >> new DescribeImagesResult().withImages(new Image().withImageId("ami-12345"))
     this.blockDevices = [new AmazonBlockDevice(deviceName: "/dev/sdb", virtualName: "ephemeral0")]
     def rspf = Stub(RegionScopedProviderFactory) {
       forRegion(_, _) >> Stub(RegionScopedProviderFactory.RegionScopedProvider) {
         getAutoScaling() >> Stub(AmazonAutoScaling)
         getAmazonEC2() >> amazonEC2
+        getAmazonElasticLoadBalancingV2() >> elbV2
+        getAmazonElasticLoadBalancing() >> elbV1
       }
     }
     def defaults = new AwsConfiguration.DeployDefaults(iamRole: 'IamRole')
     def credsRepo = new MapBackedAccountCredentialsRepository()
     credsRepo.save('baz', TestCredential.named('baz'))
-    this.handler = new BasicAmazonDeployHandler(rspf, credsRepo, defaults)
+    this.handler = new BasicAmazonDeployHandler(rspf, credsRepo, defaults) {
+      @Override LoadBalancerLookupHelper lookupHelper() {
+        return new LoadBalancerLookupHelper(RateLimiter.create(1000000))
+      }
+    }
+
     Task task = Stub(Task) {
       getResultObjects() >> []
     }
@@ -117,7 +138,7 @@ class BasicAmazonDeployHandlerUnitSpec extends Specification {
     setup:
     def setlbCalls = 0
     AutoScalingWorker.metaClass.deploy = {}
-    AutoScalingWorker.metaClass.setLoadBalancers = { setlbCalls++ }
+    AutoScalingWorker.metaClass.setClassicLoadBalancers = { setlbCalls++ }
     def description = new BasicAmazonDeployDescription(amiName: "ami-12345")
     description.availabilityZones = ["us-east-1": []]
     description.credentials = TestCredential.named('baz')
@@ -127,7 +148,48 @@ class BasicAmazonDeployHandlerUnitSpec extends Specification {
 
     then:
     setlbCalls
+    1 * elbV1.describeLoadBalancers(_) >> new DescribeLoadBalancersResult().withLoadBalancerDescriptions(new LoadBalancerDescription().withLoadBalancerName("lb"))
+    1 * elbV2.describeLoadBalancers(_) >> { throw new LoadBalancerNotFoundException("not found") }
     1 * amazonEC2.describeVpcClassicLink() >> new DescribeVpcClassicLinkResult()
+  }
+
+  void "handles classic and application load balancers"() {
+
+    def classicLbs = []
+    def targetGroupARNs = []
+    AutoScalingWorker.metaClass.setClassicLoadBalancers = { Collection<String> lbs -> classicLbs.addAll(lbs) }
+    AutoScalingWorker.metaClass.setTargetGroupArns = { Collection<String> arns -> targetGroupARNs.addAll(arns) }
+    def description = new BasicAmazonDeployDescription(amiName: "ami-12345", loadBalancers: ["lb"])
+    description.availabilityZones = ["us-east-1": []]
+    description.credentials = TestCredential.named('baz')
+
+    when:
+    handler.handle(description, [])
+
+    then:
+    1 * elbV1.describeLoadBalancers(_) >> new DescribeLoadBalancersResult().withLoadBalancerDescriptions(new LoadBalancerDescription().withLoadBalancerName("lb"))
+    1 * elbV2.describeLoadBalancers(_) >> new DescribeLBV2().withLoadBalancers(new LoadBalancer().withLoadBalancerName("lb").withLoadBalancerArn("arn:lb"))
+    1 * elbV2.describeTargetGroups(new DescribeTargetGroupsRequest().withLoadBalancerArn("arn:lb")) >> new DescribeTargetGroupsResult().withTargetGroups(new TargetGroup().withTargetGroupArn("arn:lb:targetGroup1"))
+    1 * amazonEC2.describeVpcClassicLink() >> new DescribeVpcClassicLinkResult()
+
+    classicLbs == ['lb']
+    targetGroupARNs == ['arn:lb:targetGroup1']
+  }
+
+  void "fails if load balancer name is not in classic or application load balancer"() {
+    def description = new BasicAmazonDeployDescription(amiName: "ami-12345", loadBalancers: ["lb"])
+    description.availabilityZones = ["us-east-1": []]
+    description.credentials = TestCredential.named('baz')
+
+    when:
+    handler.handle(description, [])
+
+    then:
+    1 * elbV1.describeLoadBalancers(_) >> { throw new LBNFEV1("not found") }
+    1 * elbV2.describeLoadBalancers(_) >> { throw new LoadBalancerNotFoundException("not found") }
+
+    thrown(IllegalStateException)
+
   }
 
   void "should populate classic link VPC Id when classic link is enabled"() {
@@ -519,6 +581,24 @@ class BasicAmazonDeployHandlerUnitSpec extends Specification {
     "c3.xlarge"        | "c4.xlarge"        | bD("c3.xlarge")                                 | []                      || []                                              // use the explicitly provided block devices even if an empty list
     "c3.xlarge"        | "c4.xlarge"        | bD("c3.xlarge")                                 | null                    || bD("c4.xlarge")                                 // was using default block devices, continue to use default block devices for targetInstanceType
     "c3.xlarge"        | "c4.xlarge"        | [new AmazonBlockDevice(deviceName: "/dev/xxx")] | null                    || [new AmazonBlockDevice(deviceName: "/dev/xxx")] // custom block devices should be preserved
+  }
+
+  @Unroll
+  void "should substitute {{application}} in iamRole"() {
+    given:
+    def description = new BasicAmazonDeployDescription(application: application, iamRole: iamRole)
+    def deployDefaults = new AwsConfiguration.DeployDefaults(iamRole: defaultIamRole)
+
+    expect:
+    BasicAmazonDeployHandler.iamRole(description, deployDefaults) == expectedIamRole
+
+    where:
+    application | iamRole                  | defaultIamRole           || expectedIamRole
+    "app"       | "iamRole"                | "defaultIamRole"         || "iamRole"
+    "app"       | null                     | "defaultIamRole"         || "defaultIamRole"
+    "app"       | "{{application}}IamRole" | null                     || "appIamRole"
+    "app"       | null                     | "{{application}}IamRole" || "appIamRole"
+    null        | null                     | "{{application}}IamRole" || "{{application}}IamRole"
   }
 
   private Collection<AmazonBlockDevice> bD(String instanceType) {

@@ -1,6 +1,21 @@
+/*
+ * Copyright 2016 Netflix, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License")
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.netflix.spinnaker.clouddriver.aws.deploy
 
-import com.netflix.spinnaker.clouddriver.aws.deploy.BlockDeviceConfig
 import com.netflix.spinnaker.clouddriver.aws.model.AmazonBlockDevice
 import spock.lang.Shared
 import spock.lang.Specification
@@ -8,12 +23,14 @@ import spock.lang.Unroll
 
 class BlockDeviceConfigSpec extends Specification {
 
-  @Shared static def expectedBlockDevicesForEbsOnly = [
+  @Shared
+  static def expectedBlockDevicesForEbsOnly = [
     new AmazonBlockDevice(deviceName: "/dev/sdb", size: 125),
     new AmazonBlockDevice(deviceName: "/dev/sdc", size: 125),
   ]
 
-  @Shared static def expectedD28xlargeBlockDevices = [
+  @Shared
+  static def expectedD28xlargeBlockDevices = [
     new AmazonBlockDevice(deviceName: "/dev/sdb", virtualName: "ephemeral0"),
     new AmazonBlockDevice(deviceName: "/dev/sdc", virtualName: "ephemeral1"),
     new AmazonBlockDevice(deviceName: "/dev/sdd", virtualName: "ephemeral2"),
@@ -50,7 +67,9 @@ class BlockDeviceConfigSpec extends Specification {
     instanceType || blockDevices
     "wat"         | null
     "t2.small"    | []
-    "m4.xlarge"   | expectedBlockDevicesForEbsOnly
+    "m4.xlarge"   | [new AmazonBlockDevice(deviceName: "/dev/sdb", size: 80)]
+    "m4.large"    | [new AmazonBlockDevice(deviceName: "/dev/sdb", size: 40)]
+    "m4.16xlarge" | [new AmazonBlockDevice(deviceName: "/dev/sdb", size: 120)]
     "c4.8xlarge"  | expectedBlockDevicesForEbsOnly
     "m3.medium"   | [new AmazonBlockDevice(deviceName: "/dev/sdb", virtualName: "ephemeral0")]
     "i2.2xlarge"  | [new AmazonBlockDevice(deviceName: "/dev/sdb", virtualName: "ephemeral0"), new AmazonBlockDevice(deviceName: "/dev/sdc", virtualName: "ephemeral1")]

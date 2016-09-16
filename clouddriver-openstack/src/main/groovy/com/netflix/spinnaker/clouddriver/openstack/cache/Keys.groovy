@@ -30,11 +30,20 @@ import static com.netflix.spinnaker.clouddriver.openstack.OpenstackCloudProvider
 class Keys {
 
   static enum Namespace {
+    NETWORKS,
     SUBNETS,
     INSTANCES,
+    INSTANCE_TYPES,
     APPLICATIONS,
     CLUSTERS,
-    SERVER_GROUPS
+    SERVER_GROUPS,
+    SECURITY_GROUPS,
+    LOAD_BALANCERS,
+    VIPS,
+    FLOATING_IPS,
+    PORTS,
+    IMAGES,
+    ON_DEMAND
 
     final String ns
 
@@ -65,6 +74,11 @@ class Keys {
               result << [account: parts[2], region: parts[3], instanceId: parts[4]]
             }
             break
+          case Namespace.INSTANCE_TYPES.ns:
+            if (parts.length == 5) {
+              result << [account: parts[2], region: parts[3], instanceTypeId: parts[4]]
+            }
+            break
           case Namespace.APPLICATIONS.ns:
             if (parts.length == 3) {
               result << [application: parts[2].toLowerCase()]
@@ -78,7 +92,48 @@ class Keys {
             break
           case Namespace.SUBNETS.ns:
             if (parts.length == 5) {
-              result << [id: parts[2], account: parts[3], region: parts[4]]
+              result << [account: parts[2], region: parts[3], id: parts[4]]
+            }
+            break
+          case Namespace.NETWORKS.ns:
+            if (parts.length == 5) {
+              result << [account: parts[2], region: parts[3], id: parts[4]]
+            }
+            break
+          case Namespace.SECURITY_GROUPS.ns:
+            if (parts.length == 6) {
+              def names = Names.parseName(parts[2])
+              result << [application: names.app, name: parts[2], id: parts[3], region: parts[4], account: parts[5]]
+            }
+            break
+          case Namespace.IMAGES.ns:
+            if (parts.length == 5)
+              result << [account: parts[2], region: parts[3], imageId: parts[4]]
+            break
+          case Namespace.SERVER_GROUPS.ns:
+            def names = Names.parseName(parts[5])
+            if (parts.length == 6) {
+              result << [application: names.app.toLowerCase(), cluster: parts[2], account: parts[3], region: parts[4], serverGroup: parts[5], stack: names.stack, detail: names.detail, sequence: names.sequence?.toString()]
+            }
+            break
+          case Namespace.LOAD_BALANCERS.ns:
+            if (parts.length == 6) {
+              result << [account: parts[2], region: parts[3], id: parts[4], name: parts[5]]
+            }
+            break
+          case Namespace.VIPS.ns:
+            if (parts.length == 5) {
+              result << [account: parts[2], region: parts[3], id: parts[4]]
+            }
+            break
+          case Namespace.FLOATING_IPS.ns:
+            if (parts.length == 5) {
+              result << [account: parts[2], region: parts[3], id: parts[4]]
+            }
+            break
+          case Namespace.PORTS.ns:
+            if (parts.length == 5) {
+              result << [account: parts[2], region: parts[3], id: parts[4]]
             }
             break
         }
@@ -95,8 +150,8 @@ class Keys {
     "${ID}:${Namespace.INSTANCES}:${account}:${region}:${instanceId}"
   }
 
-  static String getSubnetKey(String subnetId, String region, String account) {
-    "${ID}:${Namespace.SUBNETS}:${subnetId}:${account}:${region}"
+  static String getSubnetKey(String subnetId, String account, String region) {
+    "${ID}:${Namespace.SUBNETS}:${account}:${region}:${subnetId}"
   }
 
   static String getApplicationKey(String application) {
@@ -108,7 +163,45 @@ class Keys {
     "${ID}:${Namespace.SERVER_GROUPS}:${names.cluster}:${account}:${region}:${names.group}"
   }
 
+  //this one works with wildcards
+  static String getServerGroupKey(String cluster, String serverGroupName, String account, String region) {
+    "${ID}:${Namespace.SERVER_GROUPS}:${cluster}:${account}:${region}:${serverGroupName}"
+  }
+
   static String getClusterKey(String account, String application, String clusterName) {
     "${ID}:${Namespace.CLUSTERS}:${account}:${application}:${clusterName}"
+  }
+
+  static String getNetworkKey(String networkId, String account, String region) {
+    "${ID}:${Namespace.NETWORKS}:${account}:${region}:${networkId}"
+  }
+
+  static String getSecurityGroupKey(String securityGroupName, String securityGroupId, String account, String region) {
+    "${ID}:${Namespace.SECURITY_GROUPS}:${securityGroupName}:${securityGroupId}:${region}:${account}"
+  }
+
+  //loadBalancerName = appname or appname-stack or appname-stack-lbdescription
+  static String getLoadBalancerKey(String loadBalancerName, String loadBalancerId, String account, String region) {
+    "${ID}:${Namespace.LOAD_BALANCERS}:${account}:${region}:${loadBalancerId}:${loadBalancerName}"
+  }
+
+  static String getVipKey(String vipId, String account, String region) {
+    "${ID}:${Namespace.VIPS}:${account}:${region}:${vipId}"
+  }
+
+  static String getFloatingIPKey(String ipId, String account, String region) {
+    "${ID}:${Namespace.FLOATING_IPS}:${account}:${region}:${ipId}"
+  }
+
+  static String getPortKey(String portId, String account, String region) {
+    "${ID}:${Namespace.PORTS}:${account}:${region}:${portId}"
+  }
+
+  static String getImageKey(String imageId, String account, String region) {
+    "${ID}:${Namespace.IMAGES}:${account}:${region}:${imageId}"
+  }
+
+  static String getInstanceTypeKey(String instanceType, String account, String region) {
+    "${ID}:${Namespace.INSTANCE_TYPES}:${account}:${region}:${instanceType}"
   }
 }

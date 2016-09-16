@@ -64,7 +64,7 @@ class ApplicationsController {
         return transform(apps)
       }
     } catch (e) {
-      log.error("Unable to fetch application (${name})", e)
+      log.error("Unable to fetch application (${name})")
       throw new ApplicationNotFoundException(name: name)
     }
   }
@@ -101,6 +101,13 @@ class ApplicationsController {
         } else {
           result.clusters[account].loadBalancers.addAll(cluster.loadBalancers*.name)
           result.clusters[account].serverGroups.addAll(cluster.serverGroups*.name)
+        }
+        if (!attributes.cloudProviders) {
+          attributes.cloudProviders = cluster.type
+        } else {
+          if (!attributes.cloudProviders.split(',').contains(cluster.type)) {
+            attributes.cloudProviders += ",${cluster.type}"
+          }
         }
       }
     }

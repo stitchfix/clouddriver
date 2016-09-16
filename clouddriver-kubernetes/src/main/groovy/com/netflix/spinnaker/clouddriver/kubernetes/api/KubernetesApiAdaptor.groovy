@@ -22,6 +22,7 @@ import groovy.util.logging.Slf4j
 import io.fabric8.kubernetes.api.model.*
 import io.fabric8.kubernetes.api.model.extensions.Ingress
 import io.fabric8.kubernetes.api.model.extensions.Job
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 import io.fabric8.kubernetes.client.DefaultKubernetesClient
 import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.KubernetesClientException
@@ -55,15 +56,12 @@ class KubernetesApiAdaptor {
       new KubernetesOperationException("$operation", e)
   }
 
-  /*
-   * Exponential backoff strategy for waiting on changes to replication controllers
-   */
-  Boolean blockUntilReplicationControllerConsistent(ReplicationController desired) {
-    def current = getReplicationController(desired.metadata.namespace, desired.metadata.name)
+  Boolean blockUntilResourceConsistent(Object desired, Closure<Long> getGeneration, Closure getResource) {
+    def current = getResource()
 
     def wait = RETRY_INITIAL_WAIT_MILLIS
     def attempts = 0
-    while (current.status.observedGeneration < desired.status.observedGeneration) {
+    while (getGeneration(current) < getGeneration(desired)) {
       attempts += 1
       if (attempts > RETRY_COUNT) {
         return false
@@ -72,7 +70,7 @@ class KubernetesApiAdaptor {
       sleep(wait)
       wait = [wait * 2, RETRY_MAX_WAIT_MILLIS].min()
 
-      current = getReplicationController(desired.metadata.namespace, desired.metadata.name)
+      current = getResource()
     }
 
     return true
@@ -118,6 +116,23 @@ class KubernetesApiAdaptor {
     }
   }
 
+  List<Event> getEvents(String namespace, HasMetadata object) {
+    atomicWrapper("Get Events", namespace) { KubernetesClient client ->
+      client.events().inNamespace(namespace).withField("involvedObject.uid", object.metadata.uid).list().items
+    }
+  }
+
+  Map<String, List<Event>> getEvents(String namespace, String type) {
+    atomicWrapper("Get Events", namespace) { KubernetesClient client ->
+      def events = client.events().inNamespace(namespace).withField("involvedObject.kind", type).list().items
+      def eventMap = [:].withDefault { _ -> [] }
+      events.each { Event event ->
+        eventMap[event.involvedObject.name] += [event]
+      }
+      return eventMap
+    }
+  }
+
   Ingress createIngress(String namespace, Ingress ingress) {
     atomicWrapper("Create Ingress ${ingress?.metadata?.name}", namespace) { KubernetesClient client ->
       client.extensions().ingresses().inNamespace(namespace).create(ingress)
@@ -148,20 +163,44 @@ class KubernetesApiAdaptor {
     }
   }
 
-  List<ReplicationController> getReplicationControllers(String namespace) {
-    atomicWrapper("Get Replication Controllers", namespace) { KubernetesClient client ->
-      client.replicationControllers().inNamespace(namespace).list().items
+  List<ReplicaSet> getReplicaSets(String namespace) {
+    atomicWrapper("Get Replica Sets", namespace) { KubernetesClient client ->
+      client.extensions().replicaSets().inNamespace(namespace).list().items
     }
   }
 
-  List<Pod> getReplicationControllerPods(String namespace, String replicationControllerName) {
-    atomicWrapper("Get Replication Controller Pods for $replicationControllerName", namespace) { KubernetesClient client ->
-      client.pods().inNamespace(namespace).withLabel(KubernetesUtil.REPLICATION_CONTROLLER_LABEL, replicationControllerName).list().items
+  boolean hardDestroyReplicaSet(String namespace, String name) {
+    atomicWrapper("Hard Destroy Replica Set $name", namespace) { KubernetesClient client ->
+      client.extensions().replicaSets().inNamespace(namespace).withName(name).delete()
+    }
+  }
+
+  List<Pod> getReplicaSetPods(String namespace, String replicaSetName) {
+    atomicWrapper("Get Replica Set Pods for $replicaSetName", namespace) { KubernetesClient client ->
+      client.pods().inNamespace(namespace).withLabel(KubernetesUtil.REPLICATION_CONTROLLER_LABEL, replicaSetName).list().items
+    }
+  }
+
+  ReplicaSet getReplicaSet(String namespace, String serverGroupName) {
+    atomicWrapper("Get Replica Set $serverGroupName", namespace) { KubernetesClient client ->
+      client.extensions().replicaSets().inNamespace(namespace).withName(serverGroupName).get()
+    }
+  }
+
+  ReplicaSet resizeReplicaSet(String namespace, String name, int size) {
+    atomicWrapper("Resize Replica Set $name to $size", namespace) { KubernetesClient client ->
+      client.extensions().replicaSets().inNamespace(namespace).withName(name).scale(size)
+    }
+  }
+
+  ReplicaSet createReplicaSet(String namespace, ReplicaSet replicaSet) {
+    atomicWrapper("Create Replica Set ${replicaSet?.metadata?.name}", namespace) { KubernetesClient client ->
+      client.extensions().replicaSets().inNamespace(namespace).create(replicaSet)
     }
   }
 
   List<Pod> getJobPods(String namespace, String jobName) {
-    atomicWrapper("Get Job Pods for $jobName", namespace) { KubernetesClient client ->
+    atomicWrapper("Get JobStatus Pods for $jobName", namespace) { KubernetesClient client ->
       client.pods().inNamespace(namespace).withLabel(KubernetesUtil.JOB_LABEL, jobName).list().items
     }
   }
@@ -169,6 +208,12 @@ class KubernetesApiAdaptor {
   Pod getPod(String namespace, String name) {
     atomicWrapper("Get Pod $name", namespace) { KubernetesClient client ->
       client.pods().inNamespace(namespace).withName(name).get()
+    }
+  }
+
+  List<Pod> getPods(String namespace, Map<String, String> labels) {
+    atomicWrapper("Get Pods matching $labels", namespace) { KubernetesClient client ->
+      client.pods().inNamespace(namespace).withLabels(labels).list().items
     }
   }
 
@@ -181,6 +226,18 @@ class KubernetesApiAdaptor {
   List<Pod> getPods(String namespace) {
     atomicWrapper("Get Pods", namespace) { KubernetesClient client ->
       client.pods().inNamespace(namespace).list().items
+    }
+  }
+
+  List<ReplicationController> getReplicationControllers(String namespace) {
+    atomicWrapper("Get Replication Controllers", namespace) { KubernetesClient client ->
+      client.replicationControllers().inNamespace(namespace).list().items
+    }
+  }
+
+  List<Pod> getReplicationControllerPods(String namespace, String replicationControllerName) {
+    atomicWrapper("Get Replication Controller Pods for $replicationControllerName", namespace) { KubernetesClient client ->
+      client.pods().inNamespace(namespace).withLabel(KubernetesUtil.REPLICATION_CONTROLLER_LABEL, replicationControllerName).list().items
     }
   }
 
@@ -224,6 +281,19 @@ class KubernetesApiAdaptor {
   ReplicationController toggleReplicationControllerSpecLabels(String namespace, String name, List<String> keys, String value) {
     atomicWrapper("Toggle Replication Controller Labels to $value for $name", namespace) { KubernetesClient client ->
       def edit = client.replicationControllers().inNamespace(namespace).withName(name).cascading(false).edit().editSpec().editTemplate().editMetadata()
+
+      keys.each {
+        edit.removeFromLabels(it.toString())
+        edit.addToLabels(it.toString(), value.toString())
+      }
+
+      edit.endMetadata().endTemplate().endSpec().done()
+    }
+  }
+
+  ReplicaSet toggleReplicaSetSpecLabels(String namespace, String name, List<String> keys, String value) {
+    atomicWrapper("Toggle Replica Set Labels to $value for $name", namespace) { KubernetesClient client ->
+      def edit = client.extensions().replicaSets().inNamespace(namespace).withName(name).cascading(false).edit().editSpec().editTemplate().editMetadata()
 
       keys.each {
         edit.removeFromLabels(it.toString())
@@ -308,9 +378,9 @@ class KubernetesApiAdaptor {
     }
   }
 
-  Job createJob(String namespace, Job job) {
-    atomicWrapper("Create Job ${job?.metadata?.name}", namespace) { KubernetesClient client ->
-      client.extensions().jobs().inNamespace(namespace).create(job)
+  Pod createPod(String namespace, Pod pod) {
+    atomicWrapper("Create Pod ${pod?.metadata?.name}", namespace) { KubernetesClient client ->
+      client.pods().inNamespace(namespace).create(pod)
     }
   }
 
@@ -321,14 +391,14 @@ class KubernetesApiAdaptor {
   }
 
   Job getJob(String namespace, String name) {
-    atomicWrapper("Get Job $name", namespace) { KubernetesClient client ->
+    atomicWrapper("Get JobStatus $name", namespace) { KubernetesClient client ->
       client.extensions().jobs().inNamespace(namespace).withName(name).get()
     }
   }
 
-  boolean hardDestroyJob(String namespace, String name) {
-    atomicWrapper("Hard Destroy Job $name", namespace) { KubernetesClient client ->
-      client.extensions().jobs().inNamespace(namespace).withName(name).delete()
+  boolean hardDestroyPod(String namespace, String name) {
+    atomicWrapper("Hard Destroy Pod $name", namespace) { KubernetesClient client ->
+      client.pods().inNamespace(namespace).withName(name).delete()
     }
   }
 }

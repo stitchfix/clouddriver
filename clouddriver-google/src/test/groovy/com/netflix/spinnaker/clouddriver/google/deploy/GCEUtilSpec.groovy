@@ -16,23 +16,25 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.google.api.client.googleapis.auth.oauth2.GoogleCredential
 import com.google.api.client.googleapis.batch.BatchRequest
 import com.google.api.client.googleapis.batch.json.JsonBatchCallback
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
 import com.google.api.client.json.jackson2.JacksonFactory
 import com.google.api.services.compute.Compute
-import com.google.api.services.compute.model.Image
-import com.google.api.services.compute.model.ImageList
-import com.google.api.services.compute.model.Instance
-import com.google.api.services.compute.model.InstanceAggregatedList
-import com.google.api.services.compute.model.InstancesScopedList
-import com.google.api.services.compute.model.ServiceAccount
+import com.google.api.services.compute.model.*
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BaseGoogleInstanceDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
+import com.netflix.spinnaker.clouddriver.google.deploy.description.UpsertGoogleLoadBalancerDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleResourceNotFoundException
+import com.netflix.spinnaker.clouddriver.google.deploy.ops.loadbalancer.UpsertGoogleHttpLoadBalancerAtomicOperation
+import com.netflix.spinnaker.clouddriver.google.model.GoogleAutoscalingPolicy
+import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.*
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleLoadBalancerProvider
 import com.netflix.spinnaker.clouddriver.google.security.FakeGoogleCredentials
 import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import groovy.mock.interceptor.MockFor
@@ -40,9 +42,12 @@ import spock.lang.Shared
 import spock.lang.Specification
 import spock.lang.Unroll
 
+import static com.netflix.spinnaker.clouddriver.google.deploy.ops.loadbalancer.UpsertGoogleHttpLoadBalancerTestConstants.*
+
 class GCEUtilSpec extends Specification {
   private static final PROJECT_NAME = "my-project"
   private static final REGION = "us-central1"
+  private static final ZONE = "us-central1-f"
   private static final IMAGE_NAME = "some-image-name"
   private static final PHASE = "SOME-PHASE"
   private static final INSTANCE_LOCAL_NAME_1 = "some-instance-name-1"
@@ -402,7 +407,7 @@ class GCEUtilSpec extends Specification {
   @Unroll
   void "calibrateTargetSizeWithAutoscaler should adjust target size to within autoscaler min/max range if necessary"() {
     when:
-      def autoscalingPolicy = new BasicGoogleDeployDescription.AutoscalingPolicy(minNumReplicas: minNumReplicas, maxNumReplicas: maxNumReplicas)
+      def autoscalingPolicy = new GoogleAutoscalingPolicy(minNumReplicas: minNumReplicas, maxNumReplicas: maxNumReplicas)
       def description = new BasicGoogleDeployDescription(targetSize: origTargetSize, autoscalingPolicy: autoscalingPolicy)
       GCEUtil.calibrateTargetSizeWithAutoscaler(description)
 
@@ -414,5 +419,176 @@ class GCEUtilSpec extends Specification {
       3              | 5              | 7              | 5
       9              | 5              | 7              | 7
       6              | 5              | 7              | 6
+  }
+
+  @Unroll
+  void "checkAllForwardingRulesExist should fail if any loadbalancers aren't found"() {
+    setup:
+      def application = "my-application"
+      def task = Mock(Task)
+      def phase = "BASE_PHASE"
+      // Note: the findAll lets us use the @Unroll feature to make this test more compact.
+      def forwardingRuleNames = [networkLB?.name, httpLB?.name].findAll { it != null }
+      def loadBalancerProvider = Mock(GoogleLoadBalancerProvider)
+      def loadBalancers = [networkLB, httpLB].findAll { it != null }
+      def notFoundNames = ['bogus-name']
+      loadBalancerProvider.getApplicationLoadBalancers("") >> loadBalancers
+
+    when:
+      def foundLoadBalancers = GCEUtil.queryAllLoadBalancers(loadBalancerProvider, forwardingRuleNames, task, phase)
+
+    then:
+      foundLoadBalancers.collect { it.name } == forwardingRuleNames
+
+    when:
+      foundLoadBalancers = GCEUtil.queryAllLoadBalancers(loadBalancerProvider, forwardingRuleNames + 'bogus-name', task, phase)
+
+    then:
+      def resourceNotFound = thrown(GoogleResourceNotFoundException)
+      def msg = "Load balancers $notFoundNames not found."
+      resourceNotFound.message == msg.toString()
+
+    where:
+      networkLB                                         | httpLB
+      new GoogleLoadBalancer(name: "network").getView() | new GoogleHttpLoadBalancer(name: "http").getView()
+      null                                              | new GoogleHttpLoadBalancer(name: "http").getView()
+      new GoogleLoadBalancer(name: "network").getView() | null
+      null                                              | null
+  }
+
+  @Unroll
+  void "should add http load balancer backend if metadata exists"() {
+    setup:
+      def loadBalancerNameList = lbNames
+      def serverGroup =
+        new GoogleServerGroup(
+          name: 'application-derp-v000',
+          region: REGION,
+          regional: isRegional,
+          zone: ZONE,
+          asg: [
+            (GoogleServerGroup.View.GLOBAL_LOAD_BALANCER_NAMES): loadBalancerNameList,
+          ],
+          launchConfig: [
+            instanceTemplate: new InstanceTemplate(name: "irrelevant-instance-template-name",
+              properties: [
+                'metadata': new Metadata(items: [
+                  new Metadata.Items(
+                    key: (GoogleServerGroup.View.LOAD_BALANCING_POLICY),
+                    value: "{\"balancingMode\": \"UTILIZATION\",\"maxUtilization\": 0.80, \"listeningPort\": 8080, \"capacityScaler\": 0.77}"
+                  ),
+                  new Metadata.Items(
+                    key: (GoogleServerGroup.View.BACKEND_SERVICE_NAMES),
+                    value: backendServiceNames
+                  )
+                ])
+              ])
+          ]).view
+      def computeMock = Mock(Compute)
+      def backendServicesMock = Mock(Compute.BackendServices)
+      def backendSvcGetMock = Mock(Compute.BackendServices.Get)
+      def backendUpdateMock = Mock(Compute.BackendServices.Update)
+      def googleLoadBalancerProviderMock = Mock(GoogleLoadBalancerProvider)
+      googleLoadBalancerProviderMock.getApplicationLoadBalancers("") >> loadBalancerList
+      def task = Mock(Task)
+      def bs = new BackendService(backends: [])
+      if (lbNames) {
+        serverGroup.launchConfig.instanceTemplate.properties.metadata.items.add(
+          new Metadata.Items(
+            key: (GoogleServerGroup.View.GLOBAL_LOAD_BALANCER_NAMES),
+            value: lbNames.join(",").trim()
+          )
+        )
+      }
+
+    when:
+      GCEUtil.addHttpLoadBalancerBackends(computeMock, new ObjectMapper(), PROJECT_NAME, serverGroup,
+        googleLoadBalancerProviderMock, task, "PHASE")
+
+    then:
+      _ * computeMock.backendServices() >> backendServicesMock
+      _ * backendServicesMock.get(PROJECT_NAME, 'backend-service') >> backendSvcGetMock
+      _ * backendSvcGetMock.execute() >> bs
+      _ * backendServicesMock.update(PROJECT_NAME, 'backend-service', bs) >> backendUpdateMock
+      _ * backendUpdateMock.execute()
+      bs.backends.size == lbNames.size
+
+    where:
+      isRegional | location | loadBalancerList                                                         | lbNames                          | backendServiceNames
+      false      | ZONE     |  [new GoogleHttpLoadBalancer(name: 'spinnaker-http-load-balancer').view] | ['spinnaker-http-load-balancer'] | 'backend-service'
+      true       | REGION   |  [new GoogleHttpLoadBalancer(name: 'spinnaker-http-load-balancer').view] | ['spinnaker-http-load-balancer'] | 'backend-service'
+      false      | ZONE     |  [new GoogleHttpLoadBalancer(name: 'spinnaker-http-load-balancer').view] | ['spinnaker-http-load-balancer'] | 'backend-service'
+      true       | REGION   |  [new GoogleHttpLoadBalancer(name: 'spinnaker-http-load-balancer').view] | ['spinnaker-http-load-balancer'] | 'backend-service'
+      false      | ZONE     |  []                                                                      | []                               | null
+      true       | REGION   |  []                                                                      | []                               | null
+  }
+
+  void "should update url map if any of the services are different"() {
+    setup:
+      def description = new UpsertGoogleLoadBalancerDescription(
+        accountName: ACCOUNT_NAME,
+        "loadBalancerName": LOAD_BALANCER_NAME,
+        "portRange": PORT_RANGE,
+        "defaultService": new GoogleBackendService(
+          name: newDefault,
+          backends: [],
+          healthCheck: null,
+        ),
+        "certificate": "",
+        "hostRules": [
+          new GoogleHostRule(
+            hostPatterns: newHosts,
+            pathMatcher: new GooglePathMatcher(
+              pathRules: [
+                new GooglePathRule(
+                  paths: newPaths,
+                  backendService: new GoogleBackendService(
+                    name: newService,
+                    backends: [],
+                    healthCheck: null,
+                  )
+                )
+              ]
+            )
+          )
+        ]
+      )
+      def urlMap = new UrlMap(
+        defaultService: oldDefault,
+        hostRules: [
+            new HostRule(
+              pathMatcher: "pmName",
+              hosts: oldHosts,
+            )
+        ],
+        pathMatchers: [
+          new PathMatcher(
+            name: "pmName",
+            pathRules: [
+                new PathRule(
+                  paths: oldPaths,
+                  service: oldService,
+                )
+            ]
+          )
+        ],
+      )
+
+    when:
+      def result = GCEUtil.shouldUpdateUrlMap(urlMap, description)
+
+    then:
+      result == shouldUpdate
+
+    where:
+      oldDefault | newDefault | oldHosts  | oldPaths | oldService   | newHosts           | newPaths         | newService   | shouldUpdate
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com']          | ['/old']         | 'oldService' | false
+      'derp'     | 'nope'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com']          | ['/old']         | 'oldService' | true
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['b.com']          | ['/old']         | 'oldService' | true
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com']          | ['/new']         | 'oldService' | true
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com']          | ['/old']         | 'newService' | true
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com']          | ['/new']         | 'oldService' | true
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com']          | ['/old', '/new'] | 'oldService' | true
+      'derp'     | 'derp'     | ['a.com'] | ['/old'] | 'oldService' | ['a.com', 'b.com'] | ['/old']         | 'oldService' | true
   }
 }

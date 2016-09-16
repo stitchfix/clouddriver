@@ -26,6 +26,7 @@ import com.netflix.spinnaker.clouddriver.kubernetes.deploy.description.servergro
 import com.netflix.spinnaker.clouddriver.kubernetes.deploy.exception.KubernetesResourceNotFoundException
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
 import io.fabric8.kubernetes.api.model.ReplicationController
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 
 class CloneKubernetesAtomicOperation implements AtomicOperation<DeploymentResult> {
   private static final String BASE_PHASE = "CLONE_SERVER_GROUP"
@@ -72,7 +73,10 @@ class CloneKubernetesAtomicOperation implements AtomicOperation<DeploymentResult
     def credentials = description.credentials.credentials
 
     description.source.namespace = description.source.namespace ?: "default"
-    ReplicationController ancestorServerGroup = credentials.apiAdaptor.getReplicationController(description.source.namespace, description.source.serverGroupName)
+    def ancestorServerGroup = credentials.apiAdaptor.getReplicationController(description.source.namespace, description.source.serverGroupName)
+    if (!ancestorServerGroup) {
+      ancestorServerGroup = credentials.apiAdaptor.getReplicaSet(description.source.namespace, description.source.serverGroupName)
+    }
 
     if (!ancestorServerGroup) {
       throw new KubernetesResourceNotFoundException("Source server group $description.source.serverGroupName does not exist.")
@@ -86,8 +90,7 @@ class CloneKubernetesAtomicOperation implements AtomicOperation<DeploymentResult
     newDescription.freeFormDetails = description.freeFormDetails ?: ancestorNames.detail
     newDescription.targetSize = description.targetSize ?: ancestorServerGroup.spec?.replicas
     newDescription.namespace = description.namespace ?: description.source.namespace
-    newDescription.loadBalancers = description.loadBalancers != null ? description.loadBalancers : KubernetesUtil.getDescriptionLoadBalancers(ancestorServerGroup)
-    newDescription.securityGroups = description.securityGroups != null ? description.securityGroups : KubernetesUtil.getDescriptionSecurityGroups(ancestorServerGroup)
+    newDescription.loadBalancers = description.loadBalancers != null ? description.loadBalancers : KubernetesUtil.getLoadBalancers(ancestorServerGroup)
     newDescription.restartPolicy = description.restartPolicy ?: ancestorServerGroup.spec?.template?.spec?.restartPolicy
     if (!description.containers) {
       newDescription.containers = ancestorServerGroup.spec?.template?.spec?.containers?.collect { it ->

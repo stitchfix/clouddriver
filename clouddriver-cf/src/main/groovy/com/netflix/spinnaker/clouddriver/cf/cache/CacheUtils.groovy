@@ -36,9 +36,6 @@ import org.cloudfoundry.client.lib.domain.InstanceInfo
 
 import static com.netflix.spinnaker.clouddriver.cf.cache.Keys.Namespace.*
 
-/**
- * @author Greg Turnquist
- */
 class CacheUtils {
 
   static Collection<CloudFoundryCluster> translateClusters(Cache cacheView, Collection<CacheData> clusterData, boolean includeDetails) {
@@ -102,6 +99,9 @@ class CacheUtils {
 
     serverGroup.nativeApplication = (serverGroupEntry.attributes.nativeApplication instanceof CloudApplication) ? serverGroupEntry.attributes.nativeApplication : ProviderUtils.buildNativeApplication(serverGroupEntry.attributes.nativeApplication)
 
+    serverGroup.memory = serverGroup.nativeApplication.memory
+    serverGroup.disk = serverGroup.nativeApplication.diskQuota
+
     serverGroup.services = serverGroupEntry.attributes.services.collect {
       new CloudFoundryService([
           type: it.type,
@@ -130,7 +130,7 @@ class CacheUtils {
       loadBalancers.find { it.name == route }
     }
 
-    serverGroup.disabled = !serverGroup.nativeApplication.uris?.findResult { uri ->
+    serverGroup.disabled = !serverGroup.nativeApplication.uris?.findResults { uri ->
       def lbs = serverGroup.nativeLoadBalancers.collect { loadBalancer ->
         (loadBalancer?.nativeRoute?.name) ? loadBalancer.nativeRoute.name : ''
       }

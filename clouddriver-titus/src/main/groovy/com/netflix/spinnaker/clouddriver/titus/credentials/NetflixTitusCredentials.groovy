@@ -29,7 +29,10 @@ class NetflixTitusCredentials implements AccountCredentials<TitusCredentials> {
   final String accountType
   final List<String> requiredGroupMembership = Collections.emptyList()
   final String bastionHost
+  final String registry
   final String discovery
+  final String awsAccount
+  final String awsVpc
   final boolean discoveryEnabled
 
   private final List<TitusRegion> regions
@@ -39,6 +42,9 @@ class NetflixTitusCredentials implements AccountCredentials<TitusCredentials> {
                           String accountType,
                           List<TitusRegion> regions,
                           String bastionHost,
+                          String registry,
+                          String awsAccount,
+                          String awsVpc,
                           boolean discoveryEnabled,
                           String discovery) {
     this.name = name
@@ -46,6 +52,9 @@ class NetflixTitusCredentials implements AccountCredentials<TitusCredentials> {
     this.accountType = accountType
     this.regions = regions?.asImmutable() ?: Collections.emptyList()
     this.bastionHost = bastionHost
+    this.registry = registry
+    this.awsAccount = awsAccount
+    this.awsVpc = awsVpc
     this.discoveryEnabled = discoveryEnabled
     this.discovery = discovery
   }
@@ -66,6 +75,18 @@ class NetflixTitusCredentials implements AccountCredentials<TitusCredentials> {
 
   String getDiscovery() {
     return discovery
+  }
+
+  String getRegistry() {
+    return registry
+  }
+
+  String getAwsAccount() {
+    return awsAccount
+  }
+
+  String getAwsVpc() {
+    return awsVpc
   }
 
   boolean getDiscoveryEnabled() {

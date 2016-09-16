@@ -32,10 +32,10 @@ import org.springframework.context.annotation.Import
 import org.springframework.test.context.ContextConfiguration
 import org.springframework.test.context.web.WebAppConfiguration
 import org.springframework.web.context.support.GenericWebApplicationContext
+import spock.lang.Ignore
 import spock.lang.Specification
-/**
- * @author Greg Turnquist
- */
+
+@Ignore
 @WebAppConfiguration
 @ContextConfiguration(classes = [TestConfiguration])
 @IntegrationTest(['cf.enabled:true', 'services.front50.enabled:false',

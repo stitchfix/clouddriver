@@ -17,28 +17,37 @@
 package com.netflix.spinnaker.clouddriver.aws
 
 import com.amazonaws.metrics.AwsSdkMetrics
-import com.amazonaws.retry.RetryPolicy
+import com.amazonaws.retry.RetryPolicy.BackoffStrategy
+import com.amazonaws.retry.RetryPolicy.RetryCondition
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.awsobjectmapper.AmazonObjectMapper
 import com.netflix.spectator.aws.SpectatorMetricCollector
 import com.netflix.spinnaker.cats.agent.Agent
 import com.netflix.spinnaker.cats.provider.ProviderSynchronizerTypeWrapper
-
 import com.netflix.spinnaker.clouddriver.aws.agent.CleanupAlarmsAgent
 import com.netflix.spinnaker.clouddriver.aws.agent.CleanupDetachedInstancesAgent
 import com.netflix.spinnaker.clouddriver.aws.agent.ReconcileClassicLinkSecurityGroupsAgent
 import com.netflix.spinnaker.clouddriver.aws.bastion.BastionConfig
 import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.BasicAmazonDeployHandler
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.DefaultMigrateClusterConfigurationStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.DefaultMigrateLoadBalancerStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.DefaultMigrateSecurityGroupStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.DefaultMigrateServerGroupStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.MigrateClusterConfigurationStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.MigrateLoadBalancerStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.MigrateSecurityGroupStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.handlers.MigrateServerGroupStrategy
+import com.netflix.spinnaker.clouddriver.aws.deploy.ops.securitygroup.SecurityGroupLookupFactory
 import com.netflix.spinnaker.clouddriver.aws.deploy.userdata.LocalFileUserDataProvider
 import com.netflix.spinnaker.clouddriver.aws.deploy.userdata.NullOpUserDataProvider
 import com.netflix.spinnaker.clouddriver.aws.deploy.userdata.UserDataProvider
-import com.netflix.spinnaker.clouddriver.aws.model.SecurityGroupLookupFactory
+import com.netflix.spinnaker.clouddriver.aws.deploy.validators.BasicAmazonDeployDescriptionValidator
 import com.netflix.spinnaker.clouddriver.aws.provider.AwsCleanupProvider
 import com.netflix.spinnaker.clouddriver.aws.security.AWSProxy
-import com.netflix.spinnaker.clouddriver.aws.security.EddaTimeoutConfig
-import com.netflix.spinnaker.clouddriver.aws.security.EddaTimeoutConfig.Builder
 import com.netflix.spinnaker.clouddriver.aws.security.AmazonClientProvider
 import com.netflix.spinnaker.clouddriver.aws.security.AmazonCredentialsInitializer
+import com.netflix.spinnaker.clouddriver.aws.security.EddaTimeoutConfig
+import com.netflix.spinnaker.clouddriver.aws.security.EddaTimeoutConfig.Builder
 import com.netflix.spinnaker.clouddriver.aws.security.NetflixAmazonCredentials
 import com.netflix.spinnaker.clouddriver.aws.services.RegionScopedProviderFactory
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
@@ -89,6 +98,9 @@ class AwsConfiguration {
   @Value('${aws.cleanup.alarms.daysToKeep:90}')
   int daysToKeepAlarms
 
+  @Value('${aws.migration.infrastructureApplications}')
+  List<String> infrastructureApplications
+
   @Autowired
   SpectatorMetricCollector spectatorMetricCollector
 
@@ -111,7 +123,7 @@ class AwsConfiguration {
   }
 
   @Bean
-  AmazonClientProvider amazonClientProvider(RetryPolicy.RetryCondition instrumentedRetryCondition, RetryPolicy.BackoffStrategy instrumentedBackoffStrategy, AWSProxy proxy, EddaTimeoutConfig eddaTimeoutConfig) {
+  AmazonClientProvider amazonClientProvider(RetryCondition instrumentedRetryCondition, BackoffStrategy instrumentedBackoffStrategy, AWSProxy proxy, EddaTimeoutConfig eddaTimeoutConfig) {
     new AmazonClientProvider.Builder()
       .backoffStrategy(instrumentedBackoffStrategy)
       .retryCondition(instrumentedRetryCondition)
@@ -139,6 +151,43 @@ class AwsConfiguration {
   @ConditionalOnMissingBean(UserDataProvider)
   NullOpUserDataProvider nullOpUserDataProvider() {
     new NullOpUserDataProvider()
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
+  MigrateSecurityGroupStrategy migrateSecurityGroupStrategy(AmazonClientProvider amazonClientProvider) {
+    new DefaultMigrateSecurityGroupStrategy(amazonClientProvider, infrastructureApplications)
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
+  MigrateLoadBalancerStrategy migrateLoadBalancerStrategy(AmazonClientProvider amazonClientProvider,
+                                                          RegionScopedProviderFactory regionScopedProviderFactory,
+                                                          DeployDefaults deployDefaults) {
+    new DefaultMigrateLoadBalancerStrategy(amazonClientProvider, regionScopedProviderFactory, deployDefaults)
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
+  MigrateServerGroupStrategy migrateServerGroupStrategy(AmazonClientProvider amazonClientProvider,
+                                                        BasicAmazonDeployHandler basicAmazonDeployHandler,
+                                                        RegionScopedProviderFactory regionScopedProviderFactory,
+                                                        BasicAmazonDeployDescriptionValidator basicAmazonDeployDescriptionValidator,
+                                                        DeployDefaults deployDefaults) {
+    new DefaultMigrateServerGroupStrategy(amazonClientProvider, basicAmazonDeployHandler,
+      regionScopedProviderFactory, basicAmazonDeployDescriptionValidator, deployDefaults)
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
+  MigrateClusterConfigurationStrategy migrateClusterConfigurationStrategy(AmazonClientProvider amazonClientProvider,
+                                                                          RegionScopedProviderFactory regionScopedProviderFactory,
+                                                                          DeployDefaults deployDefaults) {
+    new DefaultMigrateClusterConfigurationStrategy(amazonClientProvider, regionScopedProviderFactory, deployDefaults)
   }
 
   @Bean

@@ -41,8 +41,9 @@ class CloneOpenstackAtomicOperationValidatorSpec extends Specification {
   String stack = 'stack1'
 
   def setup() {
-    clientProvider = Mock(OpenstackClientProvider)
-    clientProvider.getProperty('allRegions') >> ['r1']
+    clientProvider = Mock(OpenstackClientProvider) {
+      getAllRegions() >> ['r1']
+    }
     GroovyMock(OpenstackProviderFactory, global: true)
     OpenstackProviderFactory.createProvider(credentials) >> clientProvider
     credz = new OpenstackCredentials(credentials)
@@ -58,7 +59,7 @@ class CloneOpenstackAtomicOperationValidatorSpec extends Specification {
 
   def "Validate - no error"() {
     given:
-    ResizeOpenstackAtomicOperationDescription description = new ResizeOpenstackAtomicOperationDescription(serverGroupName: 'from', region: 'r1', credentials: credz, account: account, capacity: new ResizeOpenstackAtomicOperationDescription.Capacity(max: 5, min: 3))
+    ResizeOpenstackAtomicOperationDescription description = new ResizeOpenstackAtomicOperationDescription(serverGroupName: 'from', region: 'r1', credentials: credz, account: account, capacity: new ResizeOpenstackAtomicOperationDescription.Capacity(max: 5, desired: 4, min: 3))
 
     when:
     validator.validate([], description, errors)
@@ -69,7 +70,7 @@ class CloneOpenstackAtomicOperationValidatorSpec extends Specification {
 
   def "Validate invalid sizing"() {
     given:
-    ResizeOpenstackAtomicOperationDescription description = new ResizeOpenstackAtomicOperationDescription(serverGroupName: 'from', region: 'r1', credentials: credz, account: account, capacity: new ResizeOpenstackAtomicOperationDescription.Capacity(max: 3, min: 4))
+    ResizeOpenstackAtomicOperationDescription description = new ResizeOpenstackAtomicOperationDescription(serverGroupName: 'from', region: 'r1', credentials: credz, account: account, capacity: new ResizeOpenstackAtomicOperationDescription.Capacity(max: 3, min: 4, desired: 5))
 
     when:
     validator.validate([], description, errors)

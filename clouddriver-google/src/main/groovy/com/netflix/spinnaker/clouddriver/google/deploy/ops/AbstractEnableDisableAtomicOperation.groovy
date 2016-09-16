@@ -16,22 +16,24 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy.ops
 
-import com.google.api.services.compute.model.InstanceGroupManagersSetTargetPoolsRequest
-import com.google.api.services.compute.model.InstanceGroupsListInstancesRequest
-import com.google.api.services.compute.model.InstanceReference
-import com.google.api.services.compute.model.RegionInstanceGroupManagersSetTargetPoolsRequest
-import com.google.api.services.compute.model.RegionInstanceGroupsListInstancesRequest
-import com.google.api.services.compute.model.TargetPoolsAddInstanceRequest
-import com.google.api.services.compute.model.TargetPoolsRemoveInstanceRequest
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.google.api.services.compute.model.*
+import com.netflix.spinnaker.clouddriver.consul.deploy.ops.EnableDisableConsulInstance
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
+import com.netflix.spinnaker.clouddriver.google.deploy.SafeRetry
 import com.netflix.spinnaker.clouddriver.google.deploy.description.EnableDisableGoogleServerGroupDescription
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleLoadBalancerProvider
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
 import org.springframework.beans.factory.annotation.Autowired
+import retrofit.RetrofitError
 
 abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<Void> {
+  private static final List<Integer> RETRY_ERROR_CODES = [400, 412]
+  private static final List<Integer> SUCCESSFUL_ERROR_CODES = [404]
+
   abstract boolean isDisable()
 
   abstract String getPhaseName()
@@ -40,6 +42,12 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
 
   @Autowired
   GoogleClusterProvider googleClusterProvider
+
+  @Autowired
+  ObjectMapper objectMapper
+
+  @Autowired
+  GoogleLoadBalancerProvider googleLoadBalancerProvider
 
   AbstractEnableDisableAtomicOperation(EnableDisableGoogleServerGroupDescription description) {
     this.description = description
@@ -70,8 +78,42 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
     def currentTargetPoolUrls = managedInstanceGroup.getTargetPools()
     def newTargetPoolUrls = []
 
+    if (credentials.consulConfig?.enabled) {
+      task.updateStatus phaseName, "$presentParticipling server group in Consul..."
+      def instances =
+        isRegional
+        ? compute.regionInstanceGroupManagers().listManagedInstances(project, region, serverGroupName).execute().getManagedInstances()
+        : compute.instanceGroupManagers().listManagedInstances(project, zone, serverGroupName).execute().getManagedInstances()
+
+      instances.each { ManagedInstance instance ->
+        try {
+          EnableDisableConsulInstance.operate(credentials.consulConfig,
+                                              GCEUtil.getLocalName(instance.getInstance()),
+                                              disable
+                                              ? EnableDisableConsulInstance.State.disable
+                                              : EnableDisableConsulInstance.State.enable)
+        } catch (RetrofitError e) {
+          // Consul isn't running
+        }
+      }
+    }
+
+    def retry = new SafeRetry<Void>()
+
     if (disable) {
-      task.updateStatus phaseName, "Deregistering instances from load balancers..."
+      task.updateStatus phaseName, "Deregistering server group from Http(s) load balancers..."
+
+      retry.doRetry(
+          destroyHttpLoadBalancerBackends(compute, project, serverGroup, googleLoadBalancerProvider, task, phaseName),
+          "destroy",
+          "Http load balancer backends",
+          task,
+          phaseName,
+          RETRY_ERROR_CODES,
+          SUCCESSFUL_ERROR_CODES
+      )
+
+      task.updateStatus phaseName, "Deregistering server group from network load balancers..."
 
       currentTargetPoolUrls.each { targetPoolUrl ->
         def targetPoolLocalName = GCEUtil.getLocalName(targetPoolUrl)
@@ -80,7 +122,7 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
 
         def targetPool = compute.targetPools().get(project, region, targetPoolLocalName).execute()
         def instanceUrls = targetPool.getInstances()
-        def instanceReferencesToRemove = instanceUrls.findResults { instanceUrl ->
+        def instanceReferencesToRemove = instanceUrls?.findResults { instanceUrl ->
           GCEUtil.getLocalName(instanceUrl).startsWith("$serverGroupName-") ? new InstanceReference(instance: instanceUrl) : null
         }
 
@@ -94,7 +136,19 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
         }
       }
     } else {
-      task.updateStatus phaseName, "Registering instances with load balancers..."
+      task.updateStatus phaseName, "Registering server group with Http(s) load balancers..."
+
+      retry.doRetry(
+          addHttpLoadBalancerBackends(compute, objectMapper, project, serverGroup, googleLoadBalancerProvider, task, phaseName),
+          "add",
+          "Http load balancer backends",
+          task,
+          phaseName,
+          RETRY_ERROR_CODES,
+          []
+      )
+
+      task.updateStatus phaseName, "Registering instances with network load balancers..."
 
       def groupInstances =
         isRegional
@@ -173,5 +227,19 @@ abstract class AbstractEnableDisableAtomicOperation implements AtomicOperation<V
 
   Task getTask() {
     TaskRepository.threadLocalTask.get()
+  }
+
+  Closure destroyHttpLoadBalancerBackends(compute, project, serverGroup, googleLoadBalancerProvider, task, phaseName) {
+    return {
+      GCEUtil.destroyHttpLoadBalancerBackends(compute, project, serverGroup, googleLoadBalancerProvider, task, phaseName)
+      null
+    }
+  }
+
+  Closure addHttpLoadBalancerBackends(compute, objectMapper, project, serverGroup, googleLoadBalancerProvider, task, phaseName) {
+    return {
+      GCEUtil.addHttpLoadBalancerBackends(compute, objectMapper, project, serverGroup, googleLoadBalancerProvider, task, phaseName)
+      null
+    }
   }
 }

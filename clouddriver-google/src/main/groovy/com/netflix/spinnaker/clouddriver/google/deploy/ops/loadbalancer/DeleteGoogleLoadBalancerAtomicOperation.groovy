@@ -20,6 +20,7 @@ import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import com.google.api.services.compute.model.ForwardingRule
 import com.google.api.services.compute.model.Operation
 import com.google.api.services.compute.model.TargetPool
+import com.google.common.annotations.VisibleForTesting
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
 import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
@@ -46,16 +47,19 @@ class DeleteGoogleLoadBalancerAtomicOperation implements AtomicOperation<Void> {
   @Autowired
   private GoogleOperationPoller googleOperationPoller
 
-  private final DeleteGoogleLoadBalancerDescription description
+  private DeleteGoogleLoadBalancerDescription description
 
-  ThreadSleeper threadSleeper = new ThreadSleeper()
+  @VisibleForTesting
+  GoogleOperationPoller.ThreadSleeper threadSleeper = new GoogleOperationPoller.ThreadSleeper()
+
+  DeleteGoogleLoadBalancerAtomicOperation() {}
 
   DeleteGoogleLoadBalancerAtomicOperation(DeleteGoogleLoadBalancerDescription description) {
     this.description = description
   }
 
   /**
-   * curl -X POST -H "Content-Type: application/json" -d '[ { "deleteLoadBalancer": { "region": "us-central1", "credentials": "my-account-name", "loadBalancerName": "testlb" }} ]' localhost:7002/gce/ops
+   * curl -X POST -H "Content-Type: application/json" -d '[ { "deleteLoadBalancer": { "region": "us-central1", "credentials": "my-account-name", "loadBalancerName": "testlb", "loadBalancerType": "NETWORK"}} ]' localhost:7002/gce/ops
    */
   @Override
   Void operate(List priorOutputs) {
@@ -88,6 +92,11 @@ class DeleteGoogleLoadBalancerAtomicOperation implements AtomicOperation<Void> {
       GCEUtil.updateStatusAndThrowNotFoundException("Target pool $targetPoolName not found in $region for $project",
           task, BASE_PHASE)
     }
+    if (targetPool?.instances?.size > 0) {
+      task.updateStatus BASE_PHASE, "Server groups still associated with network load balancer ${description.loadBalancerName}. Failing..."
+      throw new IllegalStateException("Server groups still associated with network load balancer: ${description.loadBalancerName}.")
+    }
+
     def healthCheckUrls = targetPool.getHealthChecks()
 
     def timeoutSeconds = description.deleteOperationTimeoutSeconds
@@ -133,33 +142,28 @@ class DeleteGoogleLoadBalancerAtomicOperation implements AtomicOperation<Void> {
       }
     }
 
-    // Now make a list of the delete operations for health checks.
-    List<HealthCheckAsyncDeleteOperation> deleteHealthCheckAsyncOperations =
-        new ArrayList<HealthCheckAsyncDeleteOperation>()
-    for (String healthCheckUrl : healthCheckUrls) {
-      def healthCheckName = GCEUtil.getLocalName(healthCheckUrl)
-      task.updateStatus BASE_PHASE, "Deleting health check $healthCheckName for $project..."
-      Operation deleteHealthCheckOp = compute.httpHealthChecks().delete(project, healthCheckName).execute()
-      deleteHealthCheckAsyncOperations.add(new HealthCheckAsyncDeleteOperation(
-          healthCheckName: healthCheckName,
-          operationName: deleteHealthCheckOp.getName()))
-    }
+    // Now make a list of the delete operations for health checks if the description says to do so.
+    if (description.deleteHealthChecks) {
+      List<HealthCheckAsyncDeleteOperation> deleteHealthCheckAsyncOperations =
+          new ArrayList<HealthCheckAsyncDeleteOperation>()
+      for (String healthCheckUrl : healthCheckUrls) {
+        def healthCheckName = GCEUtil.getLocalName(healthCheckUrl)
+        task.updateStatus BASE_PHASE, "Deleting health check $healthCheckName for $project..."
+        Operation deleteHealthCheckOp = compute.httpHealthChecks().delete(project, healthCheckName).execute()
+        deleteHealthCheckAsyncOperations.add(new HealthCheckAsyncDeleteOperation(
+            healthCheckName: healthCheckName,
+            operationName: deleteHealthCheckOp.getName()))
+      }
 
-    // Finally, wait on this list of these deletes to complete.
-    for (HealthCheckAsyncDeleteOperation asyncOperation : deleteHealthCheckAsyncOperations) {
-      googleOperationPoller.waitForGlobalOperation(compute, project, asyncOperation.operationName,
-          timeoutSeconds, task, "health check " + asyncOperation.healthCheckName,
-          BASE_PHASE)
+      // Finally, wait on this list of these deletes to complete.
+      for (HealthCheckAsyncDeleteOperation asyncOperation : deleteHealthCheckAsyncOperations) {
+        googleOperationPoller.waitForGlobalOperation(compute, project, asyncOperation.operationName,
+            timeoutSeconds, task, "health check " + asyncOperation.healthCheckName,
+            BASE_PHASE)
+      }
     }
 
     task.updateStatus BASE_PHASE, "Done deleting load balancer $description.loadBalancerName in $region."
     null
-  }
-
-  // This only exists to facilitate testing.
-  static class ThreadSleeper {
-    void sleep(long seconds) {
-      Thread.currentThread().sleep(seconds * 1000)
-    }
   }
 }

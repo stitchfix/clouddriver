@@ -21,6 +21,7 @@ import com.netflix.spinnaker.clouddriver.openstack.deploy.description.securitygr
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
 import org.apache.commons.net.util.SubnetUtils
+import org.openstack4j.model.compute.IPProtocol
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.validation.Errors
@@ -34,6 +35,8 @@ import static UpsertOpenstackSecurityGroupDescription.Rule
 class OpenstackAttributeValidator {
   static final namePattern = /^[a-z0-9]+([-a-z0-9]*[a-z0-9])?$/
   static final prefixPattern = /^[a-z0-9]+$/
+  static final int MIN_PORT = -1
+  static final int MAX_PORT = (1 << 16) - 1
 
   String context
   Errors errors
@@ -42,8 +45,6 @@ class OpenstackAttributeValidator {
     this.context = context
     this.errors = errors
   }
-
-  static final maxPort = (1 << 16) - 1
 
   boolean validateByRegex(String value, String attribute, String regex) {
     def result
@@ -71,12 +72,19 @@ class OpenstackAttributeValidator {
     errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalid ($reason)")
   }
 
-  def validatePort(int port, String attribute) {
-    def result = (port >= 1 && port <= maxPort)
-    if (!result) {
-      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalid (Must be in range [1, $maxPort])")
+  def validateRange(Integer value, int min, int max, String attribute) {
+    def result = validateNotEmpty(value, attribute)
+    if (result) {
+      result = value >= min && value <= max
+      if (!result) {
+        errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notInRange (Must be in range [${min}, ${max}])")
+      }
     }
     result
+  }
+
+  def validatePortRange(Integer value, String attribute) {
+    validateRange(value, MIN_PORT, MAX_PORT, attribute)
   }
 
   boolean validateNotNull(Object obj, String attribute) {
@@ -151,6 +159,18 @@ class OpenstackAttributeValidator {
     }
     else {
       errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notGreaterThan")
+      result = false
+    }
+    result
+  }
+
+  boolean validateLessThanEqual(Integer subject, Integer other, String attribute) {
+    def result
+    if (subject != null && other != null && subject <= other) {
+      result = true
+    }
+    else {
+      errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.notLessThan")
       result = false
     }
     result
@@ -240,9 +260,19 @@ class OpenstackAttributeValidator {
     result
   }
 
+  /**
+   * Validates a security rule type. Should be TCP, UDP, or ICMP.
+   */
   def validateRuleType(String value, String attribute) {
-    validateNotEmpty(value, attribute) &&
-      validateByContainment(value, attribute, [Rule.RULE_TYPE_TCP])
+    boolean result = validateNotEmpty(value, attribute)
+    if (result) {
+      def type = IPProtocol.value(value)
+      if (type == IPProtocol.UNRECOGNIZED) {
+        errors.rejectValue("${context}.${attribute}", "${context}.${attribute}.invalidSecurityGroupRuleType")
+        result = false
+      }
+    }
+    result
   }
 
   /**
@@ -293,7 +323,7 @@ class OpenstackAttributeValidator {
     boolean result = validateNotEmpty(value, attribute)
 
     try {
-      URI.create(value)
+      new URI(value)
     } catch (MalformedURLException | URISyntaxException | IllegalArgumentException e) {
       result = false
       reject(attribute, 'invalid URL')

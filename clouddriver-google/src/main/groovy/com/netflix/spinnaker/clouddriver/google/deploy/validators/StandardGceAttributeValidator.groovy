@@ -16,10 +16,12 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy.validators
 
+import com.netflix.spinnaker.clouddriver.google.model.GoogleAutoscalingPolicy
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDisk
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDiskType
 import com.netflix.spinnaker.clouddriver.google.model.GoogleInstanceTypeDisk
 import com.netflix.spinnaker.clouddriver.google.security.GoogleCredentials
+import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
 import org.springframework.validation.Errors
 
@@ -168,14 +170,20 @@ class StandardGceAttributeValidator {
     return result
   }
 
-  // TODO(duftler): Also validate against set of supported GCE regions.
-  def validateRegion(String region) {
-    validateNotEmpty(region, "region")
+  def validateRegion(String region, GoogleNamedAccountCredentials credentials) {
+    if (validateNotEmpty(region, "region") && credentials) {
+      if (!(region in credentials.regionToZonesMap)) {
+        errors.rejectValue("region", "${context}.region.invalid")
+      }
+    }
   }
 
-  // TODO(duftler): Also validate against set of supported GCE zones.
-  def validateZone(String zone) {
-    validateNotEmpty(zone, "zone")
+  def validateZone(String zone, GoogleNamedAccountCredentials credentials) {
+    if (validateNotEmpty(zone, "zone") && credentials) {
+      if (!credentials.regionFromZone(zone)) {
+        errors.rejectValue("zone", "${context}.zone.invalid")
+      }
+    }
   }
 
   def validateNetwork(String network) {
@@ -186,6 +194,15 @@ class StandardGceAttributeValidator {
     def result = true
     if (value < 0) {
       errors.rejectValue attribute, "${context}.${attribute}.negative"
+      result = false
+    }
+    return result
+  }
+
+  def validateInRangeExclusive(double value, double min, double max, String attribute) {
+    def result = true
+    if (value <= min || value >= max) {
+      errors.rejectValue attribute, "${context}.${attribute} must be between ${min} and ${max}."
       result = false
     }
     return result
@@ -239,42 +256,16 @@ class StandardGceAttributeValidator {
     validateName(instanceName, "instanceName")
   }
 
-  // TODO(duftler): Also validate against set of supported GCE types.
-  def validateInstanceType(String instanceType, String location) {
+  def validateInstanceType(String instanceType, String location, GoogleNamedAccountCredentials credentials) {
     validateNotEmpty(instanceType, "instanceType")
     if (instanceType?.startsWith('custom')) {
-      validateCustomInstanceType(instanceType, location)
+      validateCustomInstanceType(instanceType, location, credentials)
     }
   }
 
-  /**
-   * This list should be kept in sync with the corresponding list in deck:
-   * @link { https://github.com/spinnaker/deck/tree/master/app/scripts/modules/google/instance/gceVCpuMaxByLocation.value.js }
-   */
-  def vCpuMaxByLocation = [
-    'us-east1-b': 32,
-    'us-east1-c': 32,
-    'us-east1-d': 32,
-    'us-central1-a': 16,
-    'us-central1-b': 32,
-    'us-central1-c': 32,
-    'us-central1-f': 32,
-    'europe-west1-b': 16,
-    'europe-west1-c': 32,
-    'europe-west1-d': 32,
-    'asia-east1-a': 32,
-    'asia-east1-b': 32,
-    'asia-east1-c': 32,
-    'us-east1': 32,
-    'us-central1': 32,
-    'europe-west1': 16,
-    'asia-east1': 32
-  ]
-
   def customInstanceRegExp = /custom-\d{1,2}-\d{4,6}/
 
-  def validateCustomInstanceType(String instanceType, String location) {
-
+  def validateCustomInstanceType(String instanceType, String location, GoogleNamedAccountCredentials credentials) {
     if (!(instanceType ==~ customInstanceRegExp)) {
       errors.rejectValue("instanceType", "${context}.instanceType.invalid", "Custom instance string must match pattern /custom-\\d{1,2}-\\d{4,6}/.")
       return false
@@ -309,12 +300,14 @@ class StandardGceAttributeValidator {
     }
 
     if (location) {
-      if (!(location in vCpuMaxByLocation)) {
-        errors.rejectValue("instanceType", "${context}.instanceType.invalid", "${location} not found.")
-      }
+      if (location in credentials.locationToInstanceTypesMap) {
+        def vCpuMaxForLocation = credentials.locationToInstanceTypesMap[location]?.vCpuMax
 
-      if (vCpuCount > vCpuMaxByLocation[location]) {
-        errors.rejectValue("instanceType", "${context}.instanceType.invalid", "${location} does not support more than ${vCpuMaxByLocation[location]} vCPUs.")
+        if (vCpuCount > vCpuMaxForLocation) {
+          errors.rejectValue("instanceType", "${context}.instanceType.invalid", "${location} does not support more than ${vCpuMaxForLocation} vCPUs.")
+        }
+      } else {
+        errors.rejectValue("instanceType", "${context}.instanceType.invalid", "${location} not found.")
       }
     }
   }
@@ -371,6 +364,53 @@ class StandardGceAttributeValidator {
         errors.rejectValue("disks",
                            "${context}.disk${index}.autoDelete.required",
                            "Local SSD disks must have auto-delete set.")
+      }
+    }
+  }
+
+  def validateAutoscalingPolicy(GoogleAutoscalingPolicy policy) {
+    if (policy) {
+      policy.with {
+        if (minNumReplicas != null) {
+          validateNonNegativeLong(minNumReplicas, "autoscalingPolicy.minNumReplicas")
+        }
+
+        if (maxNumReplicas != null) {
+          validateNonNegativeLong(maxNumReplicas, "autoscalingPolicy.maxNumReplicas")
+        }
+
+        if (coolDownPeriodSec != null) {
+          validateNonNegativeLong(coolDownPeriodSec, "autoscalingPolicy.coolDownPeriodSec")
+        }
+
+        if (minNumReplicas != null && maxNumReplicas != null) {
+          validateMaxNotLessThanMin(minNumReplicas,
+                                    maxNumReplicas,
+                                    "autoscalingPolicy.minNumReplicas",
+                                    "autoscalingPolicy.maxNumReplicas")
+        }
+
+        customMetricUtilizations.eachWithIndex { utilization, index ->
+          def path = "autoscalingPolicy.customMetricUtilizations[${index}]"
+
+          utilization.with {
+            validateNotEmpty(metric, "${path}.metric")
+
+            if (utilizationTarget <= 0) {
+              errors.rejectValue("${context}.${path}.utilizationTarget",
+                                 "${context}.${path}.utilizationTarget must be greater than zero.")
+            }
+
+            validateNotEmpty(utilizationTargetType, "${path}.utilizationTargetType")
+          }
+        }
+      }
+
+      [ "cpuUtilization", "loadBalancingUtilization" ].each {
+        if (policy[it] != null && policy[it].utilizationTarget != null) {
+          validateInRangeExclusive(policy[it].utilizationTarget,
+                                   0, 1, "autoscalingPolicy.${it}.utilizationTarget")
+        }
       }
     }
   }

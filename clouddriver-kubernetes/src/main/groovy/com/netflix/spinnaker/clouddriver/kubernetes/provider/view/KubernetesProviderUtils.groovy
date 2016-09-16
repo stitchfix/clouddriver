@@ -23,7 +23,11 @@ import com.netflix.spinnaker.cats.cache.CacheFilter
 import com.netflix.spinnaker.cats.cache.RelationshipCacheFilter
 import com.netflix.spinnaker.clouddriver.kubernetes.cache.Keys
 import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesInstance
+import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesServerGroup
+import io.fabric8.kubernetes.api.model.Event
 import io.fabric8.kubernetes.api.model.Pod
+import io.fabric8.kubernetes.api.model.ReplicationController
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 
 class KubernetesProviderUtils {
   static Set<CacheData> getAllMatchingKeyPattern(Cache cacheView, String namespace, String pattern) {
@@ -48,17 +52,50 @@ class KubernetesProviderUtils {
     relationships ? cacheView.getAll(relationship, relationships, cacheFilter) : []
   }
 
+  static KubernetesInstance convertInstance(ObjectMapper objectMapper, CacheData instance) {
+    def pod = objectMapper.convertValue(instance.attributes.pod, Pod)
+    def loadBalancers = instance.relationships[Keys.Namespace.LOAD_BALANCERS.ns].collect {
+      Keys.parse(it).name
+    }
+
+    return new KubernetesInstance(pod, loadBalancers)
+  }
+
   static Map<String, Set<KubernetesInstance>> controllerToInstanceMap(ObjectMapper objectMapper, Collection<CacheData> instances) {
     Map<String, Set<KubernetesInstance>> instanceMap = [:].withDefault { _ -> [] as Set }
     instances?.forEach {
-      def pod = objectMapper.convertValue(it.attributes.pod, Pod)
-      def loadBalancers = it.relationships[Keys.Namespace.LOAD_BALANCERS.ns].collect {
-        Keys.parse(it).name
-      }
-
-      KubernetesInstance instance = new KubernetesInstance(pod, loadBalancers)
+      def instance = convertInstance(objectMapper, it)
       instanceMap[instance.controllerName].add(instance)
     }
     return instanceMap
+  }
+
+  static KubernetesServerGroup serverGroupFromCacheData(ObjectMapper objectMapper, CacheData cacheData, Set<KubernetesInstance> instances) {
+    ReplicationController replicationController
+    ReplicaSet replicaSet
+    if (cacheData.attributes.replicationController) {
+      replicationController = objectMapper.convertValue(cacheData.attributes.replicationController, ReplicationController)
+    } else if (cacheData.attributes.replicaSet) {
+      replicaSet = objectMapper.convertValue(cacheData.attributes.replicaSet, ReplicaSet)
+    } else {
+      throw new IllegalStateException("Expected either a ReplicationController or ReplicaSet")
+    }
+
+    def parse = Keys.parse(cacheData.id)
+
+    List<Event> events = objectMapper.convertValue(cacheData.attributes.events, List)?.collect { event ->
+      objectMapper.convertValue(event, Event)
+    } ?: []
+
+    def serverGroup
+    if (replicationController) {
+      serverGroup = new KubernetesServerGroup(replicationController, instances, parse.account, events)
+    } else if (replicaSet) {
+      serverGroup = new KubernetesServerGroup(replicaSet, instances, parse.account, events)
+    } else {
+      throw new IllegalStateException("Expected either a ReplicationController or ReplicaSet") // Placate the linter
+    }
+
+    return serverGroup
   }
 }

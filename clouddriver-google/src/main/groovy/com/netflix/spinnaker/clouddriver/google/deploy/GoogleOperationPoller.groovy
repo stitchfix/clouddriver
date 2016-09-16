@@ -18,6 +18,7 @@ package com.netflix.spinnaker.clouddriver.google.deploy
 
 import com.google.api.services.compute.Compute
 import com.google.api.services.compute.model.Operation
+import com.google.common.annotations.VisibleForTesting
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.google.config.GoogleConfigurationProperties
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleOperationException
@@ -36,7 +37,8 @@ class GoogleOperationPoller {
   @Autowired
   GoogleConfigurationProperties googleConfigurationProperties
 
-  private ThreadSleeper threadSleeper = new ThreadSleeper()
+  @VisibleForTesting
+  ThreadSleeper threadSleeper = new ThreadSleeper()
 
   // The methods below are used to wait on the operation specified in |operationName|. This is used in practice to
   // turn the asynchronous GCE client operations into synchronous calls. Will poll the state of the operation until
@@ -90,7 +92,7 @@ class GoogleOperationPoller {
     The timeoutSeconds parameter is really treated as a lower-bound. We will poll until the operation reaches a DONE
     state or until <em>at least</em> that many seconds have passed.
    */
-  private Operation waitForOperation(Closure getOperation, long timeoutSeconds) {
+  private Operation waitForOperation(Closure<Operation> getOperation, long timeoutSeconds) {
     int totalTimePollingSeconds = 0
     boolean timeoutExceeded = false
 
@@ -103,7 +105,8 @@ class GoogleOperationPoller {
 
       totalTimePollingSeconds += pollInterval
 
-      Operation operation = getOperation()
+      def retry = new SafeRetry<Operation>()
+      Operation operation = retry.doRetry(getOperation, "wait", "operation", null, null, [], [])
 
       if (operation.getStatus() == "DONE") {
         return operation

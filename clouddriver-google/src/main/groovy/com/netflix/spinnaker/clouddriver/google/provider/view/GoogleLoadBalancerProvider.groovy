@@ -20,10 +20,15 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spinnaker.cats.cache.Cache
 import com.netflix.spinnaker.cats.cache.CacheData
 import com.netflix.spinnaker.cats.cache.RelationshipCacheFilter
+import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
-import com.netflix.spinnaker.clouddriver.google.model.GoogleLoadBalancer
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
 import com.netflix.spinnaker.clouddriver.google.model.health.GoogleLoadBalancerHealth
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleHttpLoadBalancer
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleLoadBalancer
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleLoadBalancerType
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleLoadBalancerView
 import com.netflix.spinnaker.clouddriver.model.LoadBalancerInstance
 import com.netflix.spinnaker.clouddriver.model.LoadBalancerProvider
 import com.netflix.spinnaker.clouddriver.model.LoadBalancerServerGroup
@@ -33,7 +38,7 @@ import org.springframework.stereotype.Component
 import static com.netflix.spinnaker.clouddriver.google.cache.Keys.Namespace.*
 
 @Component
-class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalancer.View> {
+class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalancerView> {
 
   @Autowired
   Cache cacheView
@@ -41,20 +46,40 @@ class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalan
   ObjectMapper objectMapper
 
   @Override
-  Set<GoogleLoadBalancer.View> getApplicationLoadBalancers(String application) {
+  Set<GoogleLoadBalancerView> getApplicationLoadBalancers(String application) {
     def pattern = Keys.getLoadBalancerKey("*", "*", "${application}*")
     def identifiers = cacheView.filterIdentifiers(LOAD_BALANCERS.ns, pattern)
 
+    def applicationServerGroups = cacheView.getAll(
+        SERVER_GROUPS.ns,
+        cacheView.filterIdentifiers(SERVER_GROUPS.ns, "${GoogleCloudProvider.GCE}:*:${application}-*")
+    )
+    applicationServerGroups.each { CacheData serverGroup ->
+      identifiers.addAll(serverGroup.relationships[LOAD_BALANCERS.ns] ?: [])
+    }
+
     cacheView.getAll(LOAD_BALANCERS.ns,
-                     identifiers,
+                     identifiers.unique(),
                      RelationshipCacheFilter.include(SERVER_GROUPS.ns)).collect { CacheData loadBalancerCacheData ->
       loadBalancersFromCacheData(loadBalancerCacheData)
     } as Set
   }
 
-  GoogleLoadBalancer.View loadBalancersFromCacheData(CacheData loadBalancerCacheData) {
-    GoogleLoadBalancer loadBalancer = objectMapper.convertValue(loadBalancerCacheData.attributes, GoogleLoadBalancer)
-    GoogleLoadBalancer.View loadBalancerView = loadBalancer?.view
+  GoogleLoadBalancerView loadBalancersFromCacheData(CacheData loadBalancerCacheData) {
+    def loadBalancer = null
+    switch (loadBalancerCacheData.attributes?.type) {
+      case GoogleLoadBalancerType.HTTP.toString():
+        loadBalancer = objectMapper.convertValue(loadBalancerCacheData.attributes, GoogleHttpLoadBalancer)
+        break
+      case GoogleLoadBalancerType.NETWORK.toString():
+        loadBalancer = objectMapper.convertValue(loadBalancerCacheData.attributes, GoogleLoadBalancer)
+        break
+      default:
+        loadBalancer = null
+        break
+    }
+
+    def loadBalancerView = loadBalancer?.view
 
     def serverGroupKeys = loadBalancerCacheData.relationships[SERVER_GROUPS.ns]
     if (!serverGroupKeys) {
@@ -63,13 +88,27 @@ class GoogleLoadBalancerProvider implements LoadBalancerProvider<GoogleLoadBalan
     cacheView.getAll(SERVER_GROUPS.ns,
                      serverGroupKeys,
                      RelationshipCacheFilter.include(INSTANCES.ns))?.each { CacheData serverGroupCacheData ->
+      if (!serverGroupCacheData) {
+        return
+      }
+
       GoogleServerGroup serverGroup = objectMapper.convertValue(serverGroupCacheData.attributes, GoogleServerGroup)
+
+      // We have to calculate the L7 disabled state with respect to this server group since it's not
+      // set on the way to the cache.
+      def isDisabledFromHttp = false
+      Boolean isHttpLoadBalancer = loadBalancer.type == GoogleLoadBalancerType.HTTP
+      if (isHttpLoadBalancer) {
+        isDisabledFromHttp = Utils.determineHttpLoadBalancerDisabledState(loadBalancer, serverGroup)
+      }
 
       def loadBalancerServerGroup = new LoadBalancerServerGroup(
           name: serverGroup.name,
-          isDisabled: serverGroup.disabled,
+          region: serverGroup.region,
+          isDisabled: isHttpLoadBalancer ? isDisabledFromHttp : serverGroup.disabled,
           detachedInstances: [],
-          instances: [])
+          instances: [],
+      )
 
       def instanceNames = serverGroupCacheData.relationships[INSTANCES.ns]?.collect {
         Keys.parse(it)?.name

@@ -25,7 +25,7 @@ import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergrou
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.DeployOpenstackAtomicOperationDescription
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackOperationException
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackProviderException
-import com.netflix.spinnaker.clouddriver.openstack.domain.ServerGroupParameters
+import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.ServerGroupParameters
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
@@ -47,7 +47,7 @@ class CloneOpenstackAtomicOperationSpec extends Specification {
   private static final String IMAGE = 'ubuntu-latest-orig'
   private static final int MAX_SIZE = 6
   private static final int MIN_SIZE = 4
-  private static final String NETWORK_ID = '12356'
+  private static final String SUBNET_ID = '12356'
   private static final String POOL_ID = '47890'
   private static final List<String> SECURITY_GROUPS = ['sg99','sg3434']
 
@@ -65,7 +65,7 @@ class CloneOpenstackAtomicOperationSpec extends Specification {
   private static final String IMAGE_N = 'ubuntu-latest'
   private static final int MAX_SIZE_N = 5
   private static final int MIN_SIZE_N = 3
-  private static final String NETWORK_ID_N = '1234'
+  private static final String SUBNET_ID_N = '1234'
   private static final String POOL_ID_N = '5678'
   private static final List<String> SECURITY_GROUPS_N = ['sg1']
 
@@ -77,14 +77,20 @@ class CloneOpenstackAtomicOperationSpec extends Specification {
   }
 
   DeployOpenstackAtomicOperationDescription createAncestorDeployAtomicOperationDescription() {
+    def scaleup = new ServerGroupParameters.Scaler(cooldown: 60, adjustment: 1, period: 60, threshold: 50)
+    def scaledown = new ServerGroupParameters.Scaler(cooldown: 60, adjustment: -1, period: 600, threshold: 15)
     def params = new ServerGroupParameters(
       instanceType: INSTANCE_TYPE,
       image:IMAGE,
       maxSize: MAX_SIZE,
       minSize: MIN_SIZE,
-      networkId: NETWORK_ID,
-      poolId: POOL_ID,
-      securityGroups: SECURITY_GROUPS
+      subnetId: SUBNET_ID,
+      loadBalancers: [POOL_ID],
+      securityGroups: SECURITY_GROUPS,
+      autoscalingType: ServerGroupParameters.AutoscalingType.CPU,
+      scaleup: scaleup,
+      scaledown: scaledown,
+      tags: ['foo':'bar']
     )
     new DeployOpenstackAtomicOperationDescription(
       stack: STACK,
@@ -95,19 +101,26 @@ class CloneOpenstackAtomicOperationSpec extends Specification {
       timeoutMins: TIMEOUT_MINS,
       disableRollback: DISABLE_ROLLBACK,
       account: ACCOUNT_NAME,
-      credentials: credentials
+      credentials: credentials,
+      userData: 'foo'
     )
   }
 
   DeployOpenstackAtomicOperationDescription createNewDeployAtomicOperationDescription() {
+    def scaleup = new ServerGroupParameters.Scaler(cooldown: 61, adjustment: 2, period: 61, threshold: 51)
+    def scaledown = new ServerGroupParameters.Scaler(cooldown: 61, adjustment: -2, period: 601, threshold: 16)
     def params = new ServerGroupParameters(
       instanceType: INSTANCE_TYPE_N,
       image:IMAGE_N,
       maxSize: MAX_SIZE_N,
       minSize: MIN_SIZE_N,
-      networkId: NETWORK_ID_N,
-      poolId: POOL_ID_N,
-      securityGroups: SECURITY_GROUPS_N
+      subnetId: SUBNET_ID_N,
+      loadBalancers: [POOL_ID_N],
+      securityGroups: SECURITY_GROUPS_N,
+      autoscalingType: ServerGroupParameters.AutoscalingType.NETWORK_INCOMING,
+      scaleup: scaleup,
+      scaledown: scaledown,
+      tags: ["foo":"barbar"]
     )
     new DeployOpenstackAtomicOperationDescription(
       stack: STACK_N,
@@ -118,7 +131,8 @@ class CloneOpenstackAtomicOperationSpec extends Specification {
       timeoutMins: TIMEOUT_MINS_N,
       disableRollback: DISABLE_ROLLBACK_N,
       account: ACCOUNT_NAME,
-      credentials: credentials
+      credentials: credentials,
+      userData: 'foo'
     )
   }
 
@@ -171,14 +185,20 @@ class CloneOpenstackAtomicOperationSpec extends Specification {
 
   def "builds a description based on ancestor server group, overrides everything"() {
     given:
+    def scaleup = new ServerGroupParameters.Scaler(cooldown: 61, adjustment: 2, period: 61, threshold: 51)
+    def scaledown = new ServerGroupParameters.Scaler(cooldown: 61, adjustment: -2, period: 601, threshold: 16)
     def params = new ServerGroupParameters(
       instanceType: INSTANCE_TYPE_N,
       image:IMAGE_N,
       maxSize: MAX_SIZE_N,
       minSize: MIN_SIZE_N,
-      networkId: NETWORK_ID_N,
-      poolId: POOL_ID_N,
-      securityGroups: SECURITY_GROUPS_N
+      subnetId: SUBNET_ID_N,
+      loadBalancers: [POOL_ID_N],
+      securityGroups: SECURITY_GROUPS_N,
+      autoscalingType: ServerGroupParameters.AutoscalingType.NETWORK_INCOMING,
+      scaleup: scaleup,
+      scaledown: scaledown,
+      tags: ["foo":"barbar"]
     )
     def inputDescription = new CloneOpenstackAtomicOperationDescription(
       stack: STACK_N,

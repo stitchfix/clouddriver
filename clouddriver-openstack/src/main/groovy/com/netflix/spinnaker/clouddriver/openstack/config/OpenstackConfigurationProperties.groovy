@@ -20,19 +20,26 @@ import groovy.transform.ToString
 
 @ToString(includeNames = true)
 class OpenstackConfigurationProperties {
+
   @ToString(includeNames = true, excludes = "password")
   static class ManagedAccount {
     String name
     String environment
     String accountType
-    String master
     String username
     String password
-    String tenantName
+    String projectName
     String domainName
-    String endpoint
+    String authUrl
     List<String> regions
     Boolean insecure
+    String heatTemplatePath
+    LbaasConfig lbaas
+  }
+
+  static class LbaasConfig {
+    Integer pollTimeout
+    Integer pollInterval
   }
 
   List<ManagedAccount> accounts = []

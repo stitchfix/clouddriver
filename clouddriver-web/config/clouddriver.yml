@@ -25,6 +25,7 @@ swagger:
     - .*security.*
     - .*vpcs.*
     - .*credentials.*
+    - .*networks.*
     - .*subnets.*
     - .*ops.*
     - .*task.*
@@ -255,17 +256,22 @@ google:
 openstack:
   enabled: ${OS_ENABLED:false}
   accounts:
-    - name: test
+    - name: my-openstack-account
       environment: test
-      accountType: v2
-      master: test
+      accountType: main
       username: ${OS_USERNAME:'username'}
       password: ${OS_PASSWORD:'password'}
-      tenantName: ${OS_TENANT_NAME:''}
+      projectName: ${OS_PROJECT_NAME:''}
       domainName: Default
-      endpoint: ${OS_AUTH_URL:''}
+      authUrl: ${OS_AUTH_URL:''}
       regions: ${OS_REGIONS:''}
       insecure: ${OS_INSECURE:false}
+      # Replacing the Heat template is not recommended
+      # The implementation is tightly coupled with the suppplied template
+      # heatTemplatePath: /path/to/custom/heat/template
+      lbaas:
+        pollTimeout: ${OS_LBAAS_POLL_TIMEOUT:60}
+        pollInterval: ${OS_LBAAS_POLL_INTERVAL:5}
 
 kubernetes:
   enabled: false
@@ -288,7 +294,7 @@ cf:
       password: ${cf.account.password}
       artifactUsername: ${cf.repo.username}
       artifactPassword: ${cf.repo.password}
- 
+
 spring:
   jackson:
     mapper:

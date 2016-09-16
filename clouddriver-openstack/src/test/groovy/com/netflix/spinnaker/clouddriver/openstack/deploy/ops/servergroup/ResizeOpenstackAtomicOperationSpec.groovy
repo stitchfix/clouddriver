@@ -23,7 +23,7 @@ import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackProviderFacto
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.ResizeOpenstackAtomicOperationDescription
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackOperationException
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackProviderException
-import com.netflix.spinnaker.clouddriver.openstack.domain.ServerGroupParameters
+import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.ServerGroupParameters
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackNamedAccountCredentials
 import org.openstack4j.model.heat.Stack
@@ -37,6 +37,7 @@ class ResizeOpenstackAtomicOperationSpec extends Specification {
   String region = "r1"
   int maxSize = 5
   int minSize = 3
+  int desiredSize = 4
   String createdStackName = 'app-stack-details-v000'
   String stackId = UUID.randomUUID().toString()
 
@@ -56,8 +57,8 @@ class ResizeOpenstackAtomicOperationSpec extends Specification {
     OpenstackNamedAccountCredentials creds = Mock(OpenstackNamedAccountCredentials)
     OpenstackProviderFactory.createProvider(creds) >> { provider }
     credentials = new OpenstackCredentials(creds)
-    serverGroupParams = new ServerGroupParameters(maxSize: maxSize, minSize: minSize)
-    description = new ResizeOpenstackAtomicOperationDescription(region: region, account: accountName, credentials: credentials, serverGroupName: createdStackName, capacity: new ResizeOpenstackAtomicOperationDescription.Capacity(min: 3, max: 5))
+    serverGroupParams = new ServerGroupParameters(maxSize: maxSize, minSize: minSize, desiredSize: desiredSize)
+    description = new ResizeOpenstackAtomicOperationDescription(region: region, account: accountName, credentials: credentials, serverGroupName: createdStackName, capacity: new ResizeOpenstackAtomicOperationDescription.Capacity(min: 3, desired: 4, max: 5))
   }
 
   def "should resize a heat stack"() {
@@ -65,7 +66,8 @@ class ResizeOpenstackAtomicOperationSpec extends Specification {
     @Subject def operation = new ResizeOpenstackAtomicOperation(description)
     Stack stack = Mock(Stack)
     String template = "foo: bar"
-    Map<String, String> sub = ['asg_resource.yaml':'foo: bar']
+    Map<String, String> sub = ['asg_resource.yaml':'foo: bar','asg_member.yaml':'foo: bar']
+    List<String> tags = ['lb123']
 
     when:
     operation.operate([])
@@ -73,11 +75,12 @@ class ResizeOpenstackAtomicOperationSpec extends Specification {
     then:
     1 * provider.getStack(region, createdStackName) >> stack
     1 * provider.getHeatTemplate(region, createdStackName, stackId) >> template
-    1 * stack.getOutputs() >> [[output_key:operation.SUBTEMPLATE_OUTPUT, output_value: sub['asg_resource.yaml']]]
+    1 * stack.getOutputs() >> [[output_key:ServerGroupConstants.SUBTEMPLATE_OUTPUT, output_value: sub['asg_resource.yaml']],[output_key:ServerGroupConstants.MEMBERTEMPLATE_OUTPUT, output_value: sub['asg_member.yaml']]]
     1 * stack.getParameters() >> serverGroupParams.toParamsMap()
     _ * stack.getId() >> stackId
     _ * stack.getName() >> createdStackName
-    1 * provider.updateStack(region, createdStackName, stackId, template, sub, serverGroupParams)
+    _ * stack.getTags() >> tags
+    1 * provider.updateStack(region, createdStackName, stackId, template, sub, _ as ServerGroupParameters, tags)
     noExceptionThrown()
   }
 
@@ -98,7 +101,8 @@ class ResizeOpenstackAtomicOperationSpec extends Specification {
     @Subject def operation = new ResizeOpenstackAtomicOperation(description)
     Stack stack = Mock(Stack)
     String template = "foo: bar"
-    Map<String, String> sub = ['asg_resource.yaml':'foo: bar']
+    Map<String, String> sub = ['asg_resource.yaml':'foo: bar','asg_member.yaml':'foo: bar']
+    List<String> tags = ['lb123']
 
     when:
     operation.operate([])
@@ -106,11 +110,12 @@ class ResizeOpenstackAtomicOperationSpec extends Specification {
     then:
     1 * provider.getStack(region, createdStackName) >> stack
     1 * provider.getHeatTemplate(region, createdStackName, stackId) >> template
-    1 * stack.getOutputs() >> [[output_key:operation.SUBTEMPLATE_OUTPUT, output_value: sub['asg_resource.yaml']]]
+    1 * stack.getOutputs() >> [[output_key:ServerGroupConstants.SUBTEMPLATE_OUTPUT, output_value: sub['asg_resource.yaml']],[output_key:ServerGroupConstants.MEMBERTEMPLATE_OUTPUT, output_value: sub['asg_member.yaml']]]
     1 * stack.getParameters() >> serverGroupParams.toParamsMap()
     _ * stack.getId() >> stackId
     _ * stack.getName() >> createdStackName
-    1 * provider.updateStack(region, createdStackName, stackId, template, sub, serverGroupParams) >> { throw new OpenstackProviderException('foo') }
+    _ * stack.getTags() >> tags
+    1 * provider.updateStack(region, createdStackName, stackId, template, sub, _ as ServerGroupParameters, tags) >> { throw new OpenstackProviderException('foo') }
     thrown(OpenstackOperationException)
   }
 }

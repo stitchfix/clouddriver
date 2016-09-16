@@ -16,14 +16,14 @@
 
 package com.netflix.spinnaker.clouddriver.google.provider.agent
 
-import com.google.api.client.googleapis.batch.BatchRequest
-import com.google.api.client.googleapis.batch.json.JsonBatchCallback
-import com.google.api.client.http.HttpHeaders
 import com.google.api.services.compute.model.Instance
+import com.google.api.services.compute.model.InstanceAggregatedList
 import com.google.api.services.compute.model.InstancesScopedList
 import com.netflix.spinnaker.cats.agent.AgentDataType
 import com.netflix.spinnaker.cats.agent.CacheResult
 import com.netflix.spinnaker.cats.provider.ProviderCache
+import com.netflix.spinnaker.clouddriver.consul.model.ConsulHealth
+import com.netflix.spinnaker.clouddriver.consul.provider.ConsulProviderUtils
 import com.netflix.spinnaker.clouddriver.google.cache.CacheResultBuilder
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
 import com.netflix.spinnaker.clouddriver.google.model.GoogleInstance
@@ -55,13 +55,21 @@ class GoogleInstanceCachingAgent extends AbstractGoogleCachingAgent {
 
   List<GoogleInstance> getInstances() {
     List<GoogleInstance> instances = new ArrayList<GoogleInstance>()
+    String pageToken = null
 
-    BatchRequest instancesRequest = buildBatchRequest()
-    InstanceAggregatedListCallback instancesCallback = new InstanceAggregatedListCallback(instances: instances)
-    compute.instances().aggregatedList(project).queue(instancesRequest, instancesCallback)
-    executeIfRequestsAreQueued(instancesRequest)
+    while (true) {
+      InstanceAggregatedList instanceAggregatedList =
+        compute.instances().aggregatedList(project).setPageToken(pageToken).execute()
 
-    instances
+      instances += transformInstances(instanceAggregatedList)
+      pageToken = instanceAggregatedList.getNextPageToken()
+
+      if (!pageToken) {
+        break
+      }
+    }
+
+    return instances
   }
 
   CacheResult buildCacheResults(ProviderCache providerCache, List<GoogleInstance> googleInstances) {
@@ -79,37 +87,40 @@ class GoogleInstanceCachingAgent extends AbstractGoogleCachingAgent {
     cacheResultBuilder.build()
   }
 
-  class InstanceAggregatedListCallback<InstanceAggregatedList> extends JsonBatchCallback<InstanceAggregatedList> implements FailureLogger {
+  List<GoogleInstance> transformInstances(InstanceAggregatedList instanceAggregatedList) throws IOException {
+    List<GoogleInstance> instances = []
 
-    List<GoogleInstance> instances
-
-    @Override
-    void onSuccess(InstanceAggregatedList instanceAggregatedList, HttpHeaders responseHeaders) throws IOException {
-      instanceAggregatedList?.items?.each { String zone, InstancesScopedList instancesScopedList ->
-        def localZoneName = Utils.getLocalName(zone)
-        instancesScopedList?.instances?.each { Instance instance ->
-          long instanceTimestamp = instance.creationTimestamp ?
-              Utils.getTimeFromTimestamp(instance.creationTimestamp) :
-              Long.MAX_VALUE
-          String instanceName = Utils.getLocalName(instance.name)
-          def googleInstance = new GoogleInstance(
-              name: instanceName,
-              instanceType: Utils.getLocalName(instance.machineType),
-              launchTime: instanceTimestamp,
-              zone: localZoneName,
-              region: credentials.regionFromZone(localZoneName),
-              networkInterfaces: instance.networkInterfaces,
-              metadata: instance.metadata,
-              disks: instance.disks,
-              serviceAccounts: instance.serviceAccounts,
-              selfLink: instance.selfLink,
-              tags: instance.tags,
-              instanceHealth: new GoogleInstanceHealth(
-                  status: GoogleInstanceHealth.Status.valueOf(instance.getStatus())
-              ))
-          instances << googleInstance
-        }
+    instanceAggregatedList?.items?.each { String zone, InstancesScopedList instancesScopedList ->
+      def localZoneName = Utils.getLocalName(zone)
+      instancesScopedList?.instances?.each { Instance instance ->
+        def consulNode = credentials.consulConfig?.enabled ?
+          ConsulProviderUtils.getHealths(credentials.consulConfig, instance.getName())
+          : null
+        long instanceTimestamp = instance.creationTimestamp ?
+            Utils.getTimeFromTimestamp(instance.creationTimestamp) :
+            Long.MAX_VALUE
+        String instanceName = Utils.getLocalName(instance.name)
+        def googleInstance = new GoogleInstance(
+            name: instanceName,
+            instanceType: Utils.getLocalName(instance.machineType),
+            launchTime: instanceTimestamp,
+            zone: localZoneName,
+            region: credentials.regionFromZone(localZoneName),
+            networkInterfaces: instance.networkInterfaces,
+            metadata: instance.metadata,
+            disks: instance.disks,
+            serviceAccounts: instance.serviceAccounts,
+            selfLink: instance.selfLink,
+            tags: instance.tags,
+            consulNode: consulNode,
+            instanceHealth: new GoogleInstanceHealth(
+                status: GoogleInstanceHealth.Status.valueOf(instance.getStatus())
+            ))
+        instances << googleInstance
       }
     }
+
+    return instances
   }
+
 }

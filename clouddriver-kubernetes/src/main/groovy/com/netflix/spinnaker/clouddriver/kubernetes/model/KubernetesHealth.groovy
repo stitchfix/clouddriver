@@ -26,15 +26,28 @@ class KubernetesHealth implements Health {
   final String source
   final String type
   final String healthClass = "platform"
+  String description = ""
 
   KubernetesHealth(Pod pod) {
     source = "Pod"
     type = "KubernetesPod"
     def phase = pod.status.phase
-    state = phase == "Pending" ? HealthState.OutOfService :
-      phase == "Running" ? HealthState.Up :
-        phase == "Succeeded" ? HealthState.Succeeded :
-          phase == "Failed" ? HealthState.Failed : HealthState.Unknown
+
+    state = HealthState.Unknown
+    if (phase == "Pending") {
+      if (!pod.status.containerStatuses) {
+        description = pod.status?.conditions?.get(0)?.reason ?: "No containers scheduled"
+        state = HealthState.Down
+      } else {
+        state = HealthState.Unknown
+      }
+    } else if (phase == "Running") {
+      state = HealthState.Up
+    } else if (phase == "Succeeded") {
+      state = HealthState.Succeeded
+    } else if (phase == "Failed") {
+      state = HealthState.Failed
+    }
   }
 
   KubernetesHealth(String service, String enabled) {
@@ -53,10 +66,12 @@ class KubernetesHealth implements Health {
       if (containerStatus.ready) {
         state = HealthState.Up
       } else {
+        description = "Readiness probe hasn't passed"
         state = HealthState.Down
       }
     } else if (containerStatus.state.terminated) {
       if (containerStatus.state.terminated.reason == "Completed") {
+        description = "Container terminated with code $containerStatus.state.terminated.exitCode"
         if (containerStatus.state.terminated.exitCode == 0) {
           state = HealthState.Succeeded
         } else {

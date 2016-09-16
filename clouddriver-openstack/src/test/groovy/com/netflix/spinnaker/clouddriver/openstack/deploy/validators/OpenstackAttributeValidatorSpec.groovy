@@ -16,20 +16,17 @@
 
 package com.netflix.spinnaker.clouddriver.openstack.deploy.validators
 
-import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackClientV2Provider
-import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackClientV3Provider
-import com.netflix.spinnaker.clouddriver.openstack.domain.LoadBalancerMethod
+import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackClientProvider
+import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackIdentityV3Provider
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackNamedAccountCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentials
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsProvider
+import org.openstack4j.model.network.ext.LbMethod
 import org.springframework.validation.Errors
 import spock.lang.Specification
 import spock.lang.Unroll
 
-/**
- *
- */
 @Unroll
 class OpenstackAttributeValidatorSpec extends Specification {
 
@@ -85,20 +82,41 @@ class OpenstackAttributeValidatorSpec extends Specification {
     1 * errors.rejectValue('context.foo', 'context.foo.invalid (reason)')
   }
 
-  def "ValidatePort"() {
+  def "validate range"() {
     when:
-    boolean actual = validator.validatePort(port, 'foo')
+    boolean actual = validator.validateRange(value, min, max, 'foo')
 
     then:
     actual == result
     if (!result) {
-      1 * errors.rejectValue('context.foo', 'context.foo.invalid (Must be in range [1, 65535])')
+      1 * errors.rejectValue('context.foo', "context.foo.notInRange (Must be in range [${min}, ${max}])")
     }
 
     where:
-    port | result
-    80   | true
-    -5   | false
+    value | min | max | result
+    80    | 0   | 100 | true
+    0     | 0   | 10  | true
+    -1    | 0   | 5   | false
+    5     | 0   | 5   | true
+    6     | 0   | 5   | false
+  }
+
+  def "validate port range - #value"() {
+    when:
+    boolean actual = validator.validatePortRange(value, 'foo')
+
+    then:
+    actual == result
+    if (!result) {
+      1 * errors.rejectValue('context.foo', "context.foo.notInRange (Must be in range [-1, 65535])")
+    }
+
+    where:
+    value | result
+    65535 | true
+    -1    | true
+    -2    | false
+    65536 | false
   }
 
   def "ValidateNotEmpty"() {
@@ -129,9 +147,9 @@ class OpenstackAttributeValidatorSpec extends Specification {
     }
 
     where:
-    value                                | result
-    LoadBalancerMethod.LEAST_CONNECTIONS | true
-    null                                 | false
+    value                      | result
+    LbMethod.LEAST_CONNECTIONS | true
+    null                       | false
   }
 
   def "ValidateNonNegative"() {
@@ -269,10 +287,13 @@ class OpenstackAttributeValidatorSpec extends Specification {
     }
 
     where:
-    value | result
-    ''    | false
-    'UDP' | false
-    'TCP' | true
+    value  | result
+    ''     | false
+    'SSH'  | false
+    'ICMP' | true
+    'UDP'  | true
+    'TCP'  | true
+    'tcp'  | true
   }
 
   def "ValidateHttpMethod"() {
@@ -363,35 +384,21 @@ class OpenstackAttributeValidatorSpec extends Specification {
   def "ValidateRegion"() {
     given:
     String region = 'region1'
-    def v2 = Mock(OpenstackClientV2Provider)
-    def v3 = Mock(OpenstackClientV3Provider)
+    def v3 = Mock(OpenstackIdentityV3Provider)
+    def v3provider = new OpenstackClientProvider(v3, null, null, null, null, null)
 
     when:
-    boolean actual = validator.validateRegion(region, v2)
+    boolean actual = validator.validateRegion(region, v3provider)
 
     then:
-    _ * v2.getProperty('allRegions') >> result
+    _ * v3.allRegions >> result
     actual == expected
 
     when:
-    actual = validator.validateRegion(region, v3)
+    actual = validator.validateRegion('', v3provider)
 
     then:
-    _ * v3.getProperty('allRegions') >> result
-    actual == expected
-
-    when:
-    actual = validator.validateRegion('', v2)
-
-    then:
-    0 * v2.getProperty('allRegions')
-    !actual
-
-    when:
-    actual = validator.validateRegion('', v3)
-
-    then:
-    0 * v3.getProperty('allRegions')
+    0 * v3.allRegions
     !actual
 
     where:

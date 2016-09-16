@@ -27,13 +27,11 @@ import com.netflix.frigga.Names
 import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.cats.agent.AgentDataType
 import com.netflix.spinnaker.cats.agent.CacheResult
-import com.netflix.spinnaker.cats.agent.DefaultCacheResult
 import com.netflix.spinnaker.cats.cache.CacheData
 import com.netflix.spinnaker.cats.cache.DefaultCacheData
 import com.netflix.spinnaker.cats.provider.ProviderCache
 import com.netflix.spinnaker.clouddriver.cache.OnDemandAgent
 import com.netflix.spinnaker.clouddriver.cache.OnDemandMetricsSupport
-import com.netflix.spinnaker.clouddriver.google.ComputeVersion
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
 import com.netflix.spinnaker.clouddriver.google.cache.CacheResultBuilder
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
@@ -52,12 +50,11 @@ import static com.netflix.spinnaker.clouddriver.google.cache.Keys.Namespace.*
 
 @Slf4j
 class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent implements OnDemandAgent {
-
   final String region
 
   final Set<AgentDataType> providedDataTypes = [
     AUTHORITATIVE.forType(SERVER_GROUPS.ns),
-    INFORMATIVE.forType(APPLICATIONS.ns),
+    AUTHORITATIVE.forType(APPLICATIONS.ns),
     INFORMATIVE.forType(CLUSTERS.ns),
     INFORMATIVE.forType(INSTANCES.ns),
     INFORMATIVE.forType(LOAD_BALANCERS.ns),
@@ -84,10 +81,6 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
 
   @Override
   CacheResult loadData(ProviderCache providerCache) {
-    if (credentials.computeVersion != ComputeVersion.ALPHA) {
-      return new DefaultCacheResult([:])
-    }
-
     def cacheResultBuilder = new CacheResultBuilder(startTime: System.currentTimeMillis())
 
     List<GoogleServerGroup> serverGroups = getServerGroups(providerCache)
@@ -167,10 +160,6 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
 
   @Override
   OnDemandAgent.OnDemandResult handle(ProviderCache providerCache, Map<String, ? extends Object> data) {
-    if (credentials.computeVersion != ComputeVersion.ALPHA) {
-      return null
-    }
-
     if (!data.containsKey("serverGroupName") || data.account != accountName || data.region != region) {
       return null
     }
@@ -216,7 +205,7 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
       evictions[SERVER_GROUPS.ns].add(serverGroupKey)
     }
 
-    log.info("On demand cache refresh succeeded. Data: ${data}")
+    log.info("On demand cache refresh succeeded. Data: ${data}. Added ${serverGroup ? 1 : 0} items to the cache.")
 
     return new OnDemandAgent.OnDemandResult(
         sourceAgentType: getOnDemandAgentType(),
@@ -281,11 +270,7 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
       }
       serverGroup.instances.clear()
 
-      serverGroup.asg.loadBalancerNames.each { String loadBalancerName ->
-        loadBalancerKeys << Keys.getLoadBalancerKey(region,
-                                                    accountName,
-                                                    loadBalancerName)
-      }
+      GoogleZonalServerGroupCachingAgent.populateLoadBalancerKeys(serverGroup, loadBalancerKeys, accountName, region)
 
       loadBalancerKeys.each { String loadBalancerKey ->
         cacheResultBuilder.namespace(LOAD_BALANCERS.ns).keep(loadBalancerKey).with {
@@ -408,16 +393,21 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
     }
 
     GoogleServerGroup buildServerGroupFromInstanceGroupManager(InstanceGroupManager instanceGroupManager) {
+      Map<String, Integer> namedPorts = [:]
+      instanceGroupManager.namedPorts.each { namedPorts[(it.name)] = it.port }
       return new GoogleServerGroup(
           name: instanceGroupManager.name,
           regional: true,
           region: region,
+          namedPorts: namedPorts,
           zones: zoneNames,
+          selfLink: instanceGroupManager.selfLink,
           currentActions: instanceGroupManager.currentActions,
           launchConfig: [createdTime: Utils.getTimeFromTimestamp(instanceGroupManager.creationTimestamp)],
           asg: [minSize        : instanceGroupManager.targetSize,
                 maxSize        : instanceGroupManager.targetSize,
-                desiredCapacity: instanceGroupManager.targetSize]
+                desiredCapacity: instanceGroupManager.targetSize],
+          autoHealingPolicy: instanceGroupManager.autoHealingPolicies?.getAt(0)
       )
     }
 
@@ -454,8 +444,6 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
 
   class InstanceTemplatesCallback<InstanceTemplate> extends JsonBatchCallback<InstanceTemplate> implements FailureLogger {
 
-    private static final String LOAD_BALANCER_NAMES = "load-balancer-names"
-
     ProviderCache providerCache
     GoogleServerGroup serverGroup
     List<String> loadBalancerNames
@@ -487,18 +475,7 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
       }
 
       def instanceMetadata = instanceTemplate?.properties?.metadata
-      if (instanceMetadata) {
-        def metadataMap = Utils.buildMapFromMetadata(instanceMetadata)
-        def loadBalancerNameList = metadataMap?.get(LOAD_BALANCER_NAMES)?.split(",")
-        if (loadBalancerNameList) {
-          serverGroup.asg.loadBalancerNames = loadBalancerNameList
-
-          // The isDisabled property of a server group is set based on whether there are associated target pools,
-          // and whether the metadata of the server group contains a list of load balancers to actually associate
-          // the server group with.
-          serverGroup.setDisabled(loadBalancerNames.empty)
-        }
-      }
+      GoogleZonalServerGroupCachingAgent.setLoadBalancerMetadataOnInstance(loadBalancerNames, instanceMetadata, serverGroup, objectMapper)
     }
   }
 
@@ -518,6 +495,8 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
     @Override
     void onSuccess(Autoscaler autoscaler, HttpHeaders responseHeaders) throws IOException {
       serverGroup.autoscalingPolicy = autoscaler.getAutoscalingPolicy()
+      serverGroup.asg.minSize = serverGroup.autoscalingPolicy.minNumReplicas
+      serverGroup.asg.maxSize = serverGroup.autoscalingPolicy.maxNumReplicas
     }
   }
 
@@ -539,6 +518,8 @@ class GoogleRegionalServerGroupCachingAgent extends AbstractGoogleCachingAgent i
 
             if (serverGroup) {
               serverGroup.autoscalingPolicy = autoscaler.getAutoscalingPolicy()
+              serverGroup.asg.minSize = serverGroup.autoscalingPolicy.minNumReplicas
+              serverGroup.asg.maxSize = serverGroup.autoscalingPolicy.maxNumReplicas
             }
           }
         }

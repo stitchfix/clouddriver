@@ -23,17 +23,20 @@ import com.netflix.spinnaker.cats.cache.CacheData
 import com.netflix.spinnaker.cats.cache.CacheFilter
 import com.netflix.spinnaker.cats.cache.RelationshipCacheFilter
 import com.netflix.spinnaker.clouddriver.kubernetes.cache.Keys
+import com.netflix.spinnaker.clouddriver.kubernetes.deploy.KubernetesUtil
 import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesCluster
 import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesInstance
 import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesLoadBalancer
-import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesSecurityGroup
 import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesServerGroup
+import com.netflix.spinnaker.clouddriver.kubernetes.provider.KubernetesProvider
 import com.netflix.spinnaker.clouddriver.model.ClusterProvider
 import com.netflix.spinnaker.clouddriver.model.ServerGroup
-import io.fabric8.kubernetes.api.model.Pod
 import io.fabric8.kubernetes.api.model.ReplicationController
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
+
+import java.util.ArrayList
 
 @Component
 class KubernetesClusterProvider implements ClusterProvider<KubernetesCluster> {
@@ -76,12 +79,10 @@ class KubernetesClusterProvider implements ClusterProvider<KubernetesCluster> {
   @Override
   KubernetesCluster getCluster(String applicationName, String account, String name) {
     CacheData serverGroupCluster = cacheView.get(Keys.Namespace.CLUSTERS.ns, Keys.getClusterKey(account, applicationName, "serverGroup", name))
-    CacheData jobCluster = cacheView.get(Keys.Namespace.CLUSTERS.ns, Keys.getClusterKey(account, applicationName, "job", name))
-    List<CacheData> clusters = [serverGroupCluster, jobCluster] - null
+    List<CacheData> clusters = [serverGroupCluster] - null
     return clusters ? translateClusters(clusters, true).inject(new KubernetesCluster()) { KubernetesCluster acc, KubernetesCluster val ->
       acc.name = acc.name ?: val.name
       acc.accountName = acc.accountName ?: val.accountName
-      acc.jobs.addAll(val.jobs)
       acc.loadBalancers.addAll(val.loadBalancers)
       acc.serverGroups.addAll(val.serverGroups)
       return acc
@@ -133,21 +134,26 @@ class KubernetesClusterProvider implements ClusterProvider<KubernetesCluster> {
   }
 
   private Map<String, Set<KubernetesServerGroup>> translateServerGroups(Collection<CacheData> serverGroupData) {
-    Collection<CacheData> allInstances = resolveRelationshipDataForCollection(cacheView, serverGroupData, Keys.Namespace.INSTANCES.ns, RelationshipCacheFilter.none())
     Collection<CacheData> allLoadBalancers = resolveRelationshipDataForCollection(cacheView, serverGroupData, Keys.Namespace.LOAD_BALANCERS.ns, RelationshipCacheFilter.include(Keys.Namespace.SECURITY_GROUPS.ns))
-
-    Map<String, Set<KubernetesInstance>> instances = KubernetesProviderUtils.controllerToInstanceMap(objectMapper, allInstances)
-
     def securityGroups = loadBalancerToSecurityGroupMap(securityGroupProvider, cacheView, allLoadBalancers)
 
     Map<String, Set<KubernetesServerGroup>> serverGroups = [:].withDefault { _ -> [] as Set }
-    serverGroupData.forEach {
-      def replicationController = objectMapper.convertValue(it.attributes.replicationController, ReplicationController)
-      def parse = Keys.parse(it.id)
-      def serverGroup = new KubernetesServerGroup(replicationController, instances[(String) it.attributes.name], parse.account)
+    serverGroupData.forEach { cacheData ->
+      Set<KubernetesInstance> instances = resolveRelationshipDataForCollection(cacheView, [cacheData], Keys.Namespace.INSTANCES.ns, RelationshipCacheFilter.none()).collect {
+        KubernetesProviderUtils.convertInstance(objectMapper, it)
+      } as Set
+      def serverGroup = KubernetesProviderUtils.serverGroupFromCacheData(objectMapper, cacheData, instances)
+
       serverGroup.loadBalancers?.each {
         serverGroup.securityGroups.addAll(securityGroups[it])
       }
+
+      def imageList = []
+      for (def container : serverGroup.deployDescription.containers) {
+        imageList.add(KubernetesUtil.getImageIdWithoutRegistry(container.imageDescription))
+      }
+      Map buildInfo = [images: imageList]
+      serverGroup.buildInfo = buildInfo
       serverGroups[Names.parseName(serverGroup.name).cluster].add(serverGroup)
     }
 
@@ -196,17 +202,18 @@ class KubernetesClusterProvider implements ClusterProvider<KubernetesCluster> {
     }
 
     Collection<CacheData> allLoadBalancers = resolveRelationshipDataForCollection(cacheView, [serverGroupData], Keys.Namespace.LOAD_BALANCERS.ns, RelationshipCacheFilter.include(Keys.Namespace.SECURITY_GROUPS.ns))
+    Set<KubernetesInstance> instances = resolveRelationshipDataForCollection(cacheView, [serverGroupData], Keys.Namespace.INSTANCES.ns, RelationshipCacheFilter.none()).collect {
+      KubernetesProviderUtils.convertInstance(objectMapper, it)
+    } as Set
 
     def securityGroups = loadBalancerToSecurityGroupMap(securityGroupProvider, cacheView, allLoadBalancers)
 
-    Set<CacheData> instances = KubernetesProviderUtils.getAllMatchingKeyPattern(cacheView, Keys.Namespace.INSTANCES.ns, Keys.getInstanceKey(account, namespace, name, "*"))
+    def serverGroup = KubernetesProviderUtils.serverGroupFromCacheData(objectMapper, serverGroupData, instances)
 
-    def replicationController = objectMapper.convertValue(serverGroupData.attributes.replicationController, ReplicationController)
-    def res = new KubernetesServerGroup(replicationController, KubernetesProviderUtils.controllerToInstanceMap(objectMapper, instances)[name], account)
-    res.loadBalancers?.each {
-      res.securityGroups.addAll(securityGroups[it])
+    serverGroup.loadBalancers?.each {
+      serverGroup.securityGroups.addAll(securityGroups[it])
     }
 
-    return res
+    return serverGroup
   }
 }

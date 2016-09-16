@@ -97,6 +97,10 @@ class AmazonSecurityGroupProvider implements SecurityGroupProvider<AmazonSecurit
     getAllMatchingKeyPattern(Keys.getSecurityGroupKey(name, '*', region, account, vpcId), true)[0]
   }
 
+  AmazonSecurityGroup getById(String account, String region, String securityGroupId, String vpcId) {
+    getAllMatchingKeyPattern(Keys.getSecurityGroupKey('*', securityGroupId, region, account, vpcId), true)[0]
+  }
+
   Set<AmazonSecurityGroup> getAllMatchingKeyPattern(String pattern, boolean includeRules) {
     loadResults(includeRules, cacheView.filterIdentifiers(SECURITY_GROUPS.ns, pattern))
   }
@@ -182,7 +186,7 @@ class AmazonSecurityGroupProvider implements SecurityGroupProvider<AmazonSecurit
         ingressGroupVpcId = parts.vpcId
       }
     }
-    return [ name: ingressGroupName, vpcId: ingressGroupVpcId ]
+    return [name: ingressGroupName, vpcId: ingressGroupVpcId]
   }
 
   private void addSecurityGroupRules(IpPermission permission, Map<GroupAndProtocol, Map> rules, String account, String region, String vpcId) {
@@ -201,7 +205,7 @@ class AmazonSecurityGroupProvider implements SecurityGroupProvider<AmazonSecurit
               accountId: sg.userId,
               accountName: ingressAccount?.name,
               region: region,
-              vpcId: ingressGroupSummary.vpcId
+              vpcId: sg.vpcId ?: ingressGroupSummary.vpcId
             ),
           portRanges   : [] as SortedSet
         ])
@@ -212,15 +216,16 @@ class AmazonSecurityGroupProvider implements SecurityGroupProvider<AmazonSecurit
 
   private void addIpRangeRules(IpPermission permission, Map<String, Map> rules) {
     permission.ipRanges.each { ipRange ->
-      if (!rules.containsKey(ipRange)) {
+      String key = "$ipRange:$permission.ipProtocol";
+      if (!rules.containsKey(key)) {
         def rangeParts = ipRange.split('/')
-        rules.put(ipRange, [
+        rules.put(key, [
           range     : new AddressableRange(ip: rangeParts[0], cidr: "/${rangeParts[1]}"),
           protocol  : permission.ipProtocol,
           portRanges: [] as SortedSet
         ])
       }
-      rules.get(ipRange).portRanges += new Rule.PortRange(startPort: permission.fromPort, endPort: permission.toPort)
+      rules.get(key).portRanges += new Rule.PortRange(startPort: permission.fromPort, endPort: permission.toPort)
     }
   }
 

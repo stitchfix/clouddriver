@@ -54,14 +54,9 @@ class RunKubernetesJobAtomicOperationValidator extends DescriptionValidator<RunK
       KubernetesVolumeSourceValidator.validate(source, helper, "volumeSources[${idx}]")
     }
 
-    description.loadBalancers.eachWithIndex { name, idx ->
-      helper.validateName(name, "loadBalancers[${idx}]")
-    }
-
-    helper.validateNotEmpty(description.containers, "containers")
-    description.containers.eachWithIndex { container, idx ->
-      KubernetesContainerValidator.validate(container, helper, "container[${idx}]")
-    }
+    helper.validateNotEmpty(description.container, "containers")
+    description.container.name = description.container.name ?: "job"
+    KubernetesContainerValidator.validate(description.container, helper, "container")
   }
 }
 

@@ -18,12 +18,12 @@ package com.netflix.spinnaker.clouddriver.openstack.model
 
 import com.netflix.spinnaker.clouddriver.model.HealthState
 import com.netflix.spinnaker.clouddriver.model.Instance
-import groovy.transform.EqualsAndHashCode
+import groovy.transform.Canonical
 import org.openstack4j.model.compute.Server
 
 import static org.openstack4j.model.compute.Server.Status
 
-@EqualsAndHashCode
+@Canonical
 class OpenstackInstance implements Instance, Serializable {
   String name
   String instanceId

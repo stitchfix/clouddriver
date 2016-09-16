@@ -33,7 +33,7 @@ import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
 import com.netflix.spinnaker.clouddriver.google.cache.CacheResultBuilder
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
 import com.netflix.spinnaker.clouddriver.google.model.GoogleHealthCheck
-import com.netflix.spinnaker.clouddriver.google.model.GoogleLoadBalancer
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleLoadBalancer
 import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
 import com.netflix.spinnaker.clouddriver.google.model.health.GoogleLoadBalancerHealth
 import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
@@ -193,12 +193,16 @@ class GoogleLoadBalancerCachingAgent extends AbstractGoogleCachingAgent implemen
         loadBalancers << newLoadBalancer
 
         if (forwardingRule.target) {
-          def targetPoolName = Utils.getLocalName(forwardingRule.target)
-          def targetPoolsCallback = new TargetPoolCallback(googleLoadBalancer: newLoadBalancer,
-                                                           httpHealthChecksRequest: httpHealthChecksRequest,
-                                                           instanceHealthRequest: instanceHealthRequest)
+          def forwardingRuleTokens = forwardingRule.target.split("/")
 
-          compute.targetPools().get(project, region, targetPoolName).queue(targetPoolsRequest, targetPoolsCallback)
+          if (forwardingRuleTokens[forwardingRuleTokens.size() - 2] != "targetVpnGateways") {
+            def targetPoolName = Utils.getLocalName(forwardingRule.target)
+            def targetPoolsCallback = new TargetPoolCallback(googleLoadBalancer: newLoadBalancer,
+                                                             httpHealthChecksRequest: httpHealthChecksRequest,
+                                                             instanceHealthRequest: instanceHealthRequest)
+
+            compute.targetPools().get(project, region, targetPoolName).queue(targetPoolsRequest, targetPoolsCallback)
+          }
         }
       }
     }
@@ -213,6 +217,7 @@ class GoogleLoadBalancerCachingAgent extends AbstractGoogleCachingAgent implemen
 
     @Override
     void onSuccess(TargetPool targetPool, HttpHeaders responseHeaders) throws IOException {
+      googleLoadBalancer.targetPool = targetPool?.selfLink
       boolean hasHealthChecks = targetPool?.healthChecks
       targetPool?.healthChecks?.each { def healthCheckUrl ->
         def localHealthCheckName = Utils.getLocalName(healthCheckUrl)

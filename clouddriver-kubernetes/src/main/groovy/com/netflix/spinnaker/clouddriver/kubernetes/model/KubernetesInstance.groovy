@@ -21,11 +21,13 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spinnaker.clouddriver.kubernetes.deploy.KubernetesUtil
 import com.netflix.spinnaker.clouddriver.model.HealthState
 import com.netflix.spinnaker.clouddriver.model.Instance
+import io.fabric8.kubernetes.api.model.Event
 import io.fabric8.kubernetes.api.model.Pod
 import io.fabric8.kubernetes.client.internal.SerializationUtils
 
 class KubernetesInstance implements Instance, Serializable {
   String name
+  String location
   String instanceId
   Long launchTime
   String zone
@@ -33,6 +35,7 @@ class KubernetesInstance implements Instance, Serializable {
   String controllerName
   Pod pod
   List<String> loadBalancers
+  List<KubernetesEvent> events
   String providerType = "kubernetes"
   String yaml
 
@@ -41,13 +44,21 @@ class KubernetesInstance implements Instance, Serializable {
   }
 
   KubernetesInstance(Pod pod, List<String> loadBalancers) {
+    this(pod, loadBalancers, [])
+  }
+
+  KubernetesInstance(Pod pod, List<String> loadBalancers, List<Event> events) {
     this.name = pod.metadata?.name
+    this.location = pod.metadata?.namespace
     this.instanceId = this.name
     this.launchTime = KubernetesModelUtil.translateTime(pod.status?.startTime)
     this.zone = pod.metadata?.namespace
     this.pod = pod
     this.yaml = SerializationUtils.dumpWithoutRuntimeStateAsYaml(pod)
     this.loadBalancers = loadBalancers
+    this.events = events?.collect { event ->
+      new KubernetesEvent(event)
+    } - null
 
     def mapper = new ObjectMapper()
     this.health = pod.status?.containerStatuses?.collect {

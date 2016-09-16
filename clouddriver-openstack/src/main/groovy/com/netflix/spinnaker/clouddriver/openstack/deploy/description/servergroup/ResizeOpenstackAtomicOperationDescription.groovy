@@ -16,18 +16,17 @@
 
 package com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup
 
-import com.netflix.spinnaker.clouddriver.openstack.deploy.description.OpenstackAtomicOperationDescription
 import groovy.transform.Canonical
 
 @Canonical
-class ResizeOpenstackAtomicOperationDescription extends OpenstackAtomicOperationDescription {
+class ResizeOpenstackAtomicOperationDescription extends OpenstackServerGroupAtomicOperationDescription {
 
-  String serverGroupName
   Capacity capacity = new Capacity()
 
   static class Capacity {
     int min
     int max
+    int desired
   }
 
 }

@@ -33,6 +33,8 @@ final class AtomicOperations {
   public static final String UPDATE_LAUNCH_CONFIG = "updateLaunchConfig"
   public static final String UPSERT_SCALING_POLICY = "upsertScalingPolicy"
   public static final String DELETE_SCALING_POLICY = "deleteScalingPolicy"
+  public static final String MIGRATE_SERVER_GROUP = "migrateServerGroup"
+  public static final String MIGRATE_CLUSTER_CONFIGURATIONS = "migrateClusterConfigurations"
 
   // Instance operations
   public static final String REBOOT_INSTANCES = "rebootInstances"
@@ -41,20 +43,29 @@ final class AtomicOperations {
   public static final String ATTACH_CLASSIC_LINK_VPC = "attachClassicLinkVpc"
   public static final String REGISTER_INSTANCES_WITH_LOAD_BALANCER = "registerInstancesWithLoadBalancer"
   public static final String DEREGISTER_INSTANCES_FROM_LOAD_BALANCER = "deregisterInstancesFromLoadBalancer"
-  public static final String ENABLE_INSTANCES_IN_EUREKA = "enableInstancesInDiscovery"
-  public static final String DISABLE_INSTANCES_IN_EUREKA = "disableInstancesInDiscovery"
+  public static final String ENABLE_INSTANCES_IN_DISCOVERY = "enableInstancesInDiscovery"
+  public static final String DISABLE_INSTANCES_IN_DISCOVERY = "disableInstancesInDiscovery"
   public static final String UPDATE_INSTANCES = "updateInstances"
 
   // Load Balancer operations
   public static final String DELETE_LOAD_BALANCER = "deleteLoadBalancer"
   public static final String UPSERT_LOAD_BALANCER = "upsertLoadBalancer"
+  public static final String MIGRATE_LOAD_BALANCER = "migrateLoadBalancer"
 
   // Security Group operations
   public static final String DELETE_SECURITY_GROUP = "deleteSecurityGroup"
   public static final String UPSERT_SECURITY_GROUP = "upsertSecurityGroup"
+  public static final String MIGRATE_SECURITY_GROUP = "migrateSecurityGroup"
 
-  // Job operations
+  // JobStatus operations
   public static final String RUN_JOB = "runJob"
   public static final String DESTROY_JOB = "destroyJob"
   public static final String CLONE_JOB = "cloneJob"
+
+  // Image operations
+  public static final String UPSERT_IMAGE_TAGS = "upsertImageTags"
+
+  // Snapshot operations
+  public static final String SAVE_SNAPSHOT = "saveSnapshot"
+  public static final String RESTORE_SNAPSHOT = "restoreSnapshot"
 }

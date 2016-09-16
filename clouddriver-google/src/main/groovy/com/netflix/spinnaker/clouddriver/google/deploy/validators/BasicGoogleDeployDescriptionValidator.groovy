@@ -42,29 +42,39 @@ class BasicGoogleDeployDescriptionValidator extends DescriptionValidator<BasicGo
     helper.validateCredentials(description.accountName, accountCredentialsProvider)
     helper.validateImage(description.image)
     helper.validateInstanceType(description.instanceType,
-                                description.regional ? description.region : description.zone)
+                                description.regional ? description.region : description.zone,
+                                description.credentials)
     helper.validateInstanceTypeDisks(googleDeployDefaults.determineInstanceTypeDisk(description.instanceType),
                                      description.disks)
     helper.validateAuthScopes(description.authScopes)
 
     if (description.regional) {
-      helper.validateRegion(description.region)
+      helper.validateRegion(description.region, description.credentials)
     } else {
-      helper.validateZone(description.zone)
+      helper.validateZone(description.zone, description.credentials)
     }
 
     helper.validateName(description.application, "application")
-    helper.validateNotEmpty(description.targetSize, "targetSize")
-    helper.validateNonNegativeLong(description.targetSize ?: 0, "targetSize")
 
-    description.autoscalingPolicy?.with {
-      helper.validateNonNegativeLong(minNumReplicas, "autoscalingPolicy.minNumReplicas")
-      helper.validateNonNegativeLong(maxNumReplicas, "autoscalingPolicy.maxNumReplicas")
-      helper.validateNonNegativeLong(coolDownPeriodSec, "autoscalingPolicy.coolDownPeriodSec")
-      helper.validateMaxNotLessThanMin(minNumReplicas,
-                                       maxNumReplicas,
-                                       "autoscalingPolicy.minNumReplicas",
-                                       "autoscalingPolicy.maxNumReplicas")
+    if (description.capacity) {
+      helper.validateNotEmpty(description.capacity.min, "capacity.min")
+      helper.validateNonNegativeLong(description.capacity.min ?: 0, "capacity.min")
+      helper.validateNotEmpty(description.capacity.max, "capacity.max")
+      helper.validateNonNegativeLong(description.capacity.max ?: 0, "capacity.max")
+      helper.validateNotEmpty(description.capacity.desired, "capacity.desired")
+      helper.validateNonNegativeLong(description.capacity.desired ?: 0, "capacity.desired")
+    } else {
+      helper.validateNotEmpty(description.targetSize, "targetSize")
+      helper.validateNonNegativeLong(description.targetSize ?: 0, "targetSize")
+    }
+
+    helper.validateAutoscalingPolicy(description.autoscalingPolicy)
+
+    description.autoHealingPolicy?.with {
+      if (healthCheck != null) {
+        helper.validateName(healthCheck, "autoHealingPolicy.healthCheck")
+        helper.validateNonNegativeLong(initialDelaySec, "autoHealingPolicy.initialDelaySec")
+      }
     }
   }
 }

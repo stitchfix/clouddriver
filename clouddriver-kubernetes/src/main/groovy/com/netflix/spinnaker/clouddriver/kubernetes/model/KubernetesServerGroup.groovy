@@ -24,7 +24,9 @@ import com.netflix.spinnaker.clouddriver.model.HealthState
 import com.netflix.spinnaker.clouddriver.model.ServerGroup
 import groovy.transform.CompileStatic
 import groovy.transform.EqualsAndHashCode
+import io.fabric8.kubernetes.api.model.Event
 import io.fabric8.kubernetes.api.model.ReplicationController
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 import io.fabric8.kubernetes.client.internal.SerializationUtils
 
 @CompileStatic
@@ -44,8 +46,10 @@ class KubernetesServerGroup implements ServerGroup, Serializable {
   Map<String, Object> launchConfig
   Map<String, String> labels = [:]
   DeployKubernetesAtomicOperationDescription deployDescription
-  ReplicationController replicationController
+  String kind // Kubernetes resource-type
   String yaml
+  Map buildInfo
+  List<KubernetesEvent> events
 
   Boolean isDisabled() {
     this.labels ? !(this.labels.any { key, value -> KubernetesUtil.isLoadBalancerLabel(key) && value == "true" }) : false
@@ -57,7 +61,28 @@ class KubernetesServerGroup implements ServerGroup, Serializable {
     this.namespace = namespace
   }
 
-  KubernetesServerGroup(ReplicationController replicationController, Set<KubernetesInstance> instances, String account) {
+  KubernetesServerGroup(ReplicaSet replicaSet, Set<KubernetesInstance> instances, String account, List<Event> events) {
+    this.name = replicaSet.metadata?.name
+    this.account = account
+    this.region = replicaSet.metadata?.namespace
+    this.namespace = this.region
+    this.createdTime = KubernetesModelUtil.translateTime(replicaSet.metadata?.creationTimestamp)
+    this.zones = [this.region] as Set
+    this.instances = instances
+    this.securityGroups = []
+    this.replicas = replicaSet.spec?.replicas ?: 0
+    this.loadBalancers = KubernetesUtil.getLoadBalancers(replicaSet) as Set
+    this.launchConfig = [:]
+    this.labels = replicaSet.spec?.template?.metadata?.labels
+    this.deployDescription = KubernetesApiConverter.fromReplicaSet(replicaSet)
+    this.yaml = SerializationUtils.dumpWithoutRuntimeStateAsYaml(replicaSet)
+    this.kind = replicaSet.kind
+    this.events = events.collect {
+      new KubernetesEvent(it)
+    }
+  }
+
+  KubernetesServerGroup(ReplicationController replicationController, Set<KubernetesInstance> instances, String account, List<Event> events) {
     this.name = replicationController.metadata?.name
     this.account = account
     this.region = replicationController.metadata?.namespace
@@ -67,12 +92,15 @@ class KubernetesServerGroup implements ServerGroup, Serializable {
     this.instances = instances
     this.securityGroups = []
     this.replicas = replicationController.spec?.replicas ?: 0
-    this.loadBalancers = KubernetesUtil.getDescriptionLoadBalancers(replicationController) as Set
+    this.loadBalancers = KubernetesUtil.getLoadBalancers(replicationController) as Set
     this.launchConfig = [:]
     this.labels = replicationController.spec?.template?.metadata?.labels
     this.deployDescription = KubernetesApiConverter.fromReplicationController(replicationController)
-    this.replicationController = replicationController
     this.yaml = SerializationUtils.dumpWithoutRuntimeStateAsYaml(replicationController)
+    this.kind = replicationController.kind
+    this.events = events.collect {
+      new KubernetesEvent(it)
+    }
   }
 
   @Override
@@ -94,6 +122,7 @@ class KubernetesServerGroup implements ServerGroup, Serializable {
 
   @Override
   ServerGroup.ImagesSummary getImagesSummary() {
+    def bi = buildInfo
     return new ServerGroup.ImagesSummary() {
       @Override
       List<ServerGroup.ImageSummary> getSummaries () {
@@ -105,7 +134,7 @@ class KubernetesServerGroup implements ServerGroup, Serializable {
 
             @Override
             Map<String, Object> getBuildInfo() {
-              return [:]
+              return bi
             }
 
             @Override

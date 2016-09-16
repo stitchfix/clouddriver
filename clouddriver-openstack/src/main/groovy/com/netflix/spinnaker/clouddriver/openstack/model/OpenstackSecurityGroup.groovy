@@ -17,6 +17,7 @@
 
 package com.netflix.spinnaker.clouddriver.openstack.model
 
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.netflix.spinnaker.clouddriver.model.SecurityGroup
 import com.netflix.spinnaker.clouddriver.model.SecurityGroupSummary
@@ -37,6 +38,7 @@ class OpenstackSecurityGroup implements SecurityGroup {
   final Set<Rule> inboundRules
   final Set<Rule> outboundRules
 
+  @JsonIgnore
   @Override
   SecurityGroupSummary getSummary() {
     new OpenstackSecurityGroupSummary(name: name, id: id)

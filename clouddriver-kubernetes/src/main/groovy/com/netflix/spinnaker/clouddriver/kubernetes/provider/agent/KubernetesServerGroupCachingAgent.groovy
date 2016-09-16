@@ -35,6 +35,7 @@ import com.netflix.spinnaker.clouddriver.kubernetes.security.KubernetesCredentia
 import groovy.util.logging.Slf4j
 import io.fabric8.kubernetes.api.model.Pod
 import io.fabric8.kubernetes.api.model.ReplicationController
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 
 import static com.netflix.spinnaker.cats.agent.AgentDataType.Authority.AUTHORITATIVE
 import static com.netflix.spinnaker.cats.agent.AgentDataType.Authority.INFORMATIVE
@@ -52,7 +53,7 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
   final OnDemandMetricsSupport metricsSupport
 
   static final Set<AgentDataType> types = Collections.unmodifiableSet([
-    INFORMATIVE.forType(Keys.Namespace.APPLICATIONS.ns),
+    AUTHORITATIVE.forType(Keys.Namespace.APPLICATIONS.ns),
     AUTHORITATIVE.forType(Keys.Namespace.CLUSTERS.ns),
     INFORMATIVE.forType(Keys.Namespace.LOAD_BALANCERS.ns),
     AUTHORITATIVE.forType(Keys.Namespace.SERVER_GROUPS.ns),
@@ -117,8 +118,12 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
       loadReplicationController(serverGroupName)
     }
 
+    ReplicaSet replicaSet = metricsSupport.readData {
+      loadReplicaSet(serverGroupName)
+    }
+
     CacheResult result = metricsSupport.transformData {
-      buildCacheResult([replicationController], [:], [], Long.MAX_VALUE)
+      buildCacheResult([new ReplicaSetOrController(replicationController: replicationController, replicaSet: replicaSet)], [:], [], Long.MAX_VALUE)
     }
 
     def jsonResult = objectMapper.writeValueAsString(result.cacheResults)
@@ -145,7 +150,7 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
     }
 
     // Evict this server group if it no longer exists.
-    Map<String, Collection<String>> evictions = replicationController ? [:] : [
+    Map<String, Collection<String>> evictions = replicationController || replicaSet ? [:] : [
       (Keys.Namespace.SERVER_GROUPS.ns): [
         Keys.getServerGroupKey(accountName, namespace, serverGroupName)
       ]
@@ -191,24 +196,38 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
     credentials.apiAdaptor.getReplicationControllers(namespace)
   }
 
+  List<ReplicaSet> loadReplicaSets() {
+    credentials.apiAdaptor.getReplicaSets(namespace)
+  }
+
+  ReplicaSet loadReplicaSet(String name) {
+    credentials.apiAdaptor.getReplicaSet(namespace, name)
+  }
+
   ReplicationController loadReplicationController(String name) {
     credentials.apiAdaptor.getReplicationController(namespace, name)
   }
 
-  List<Pod> loadPods(String replicationControllerName) {
-    credentials.apiAdaptor.getReplicationControllerPods(namespace, replicationControllerName)
+  List<Pod> loadPods(ReplicaSetOrController serverGroup) {
+    credentials.apiAdaptor.getPods(namespace, serverGroup.selector)
   }
 
   @Override
   CacheResult loadData(ProviderCache providerCache) {
     Long start = System.currentTimeMillis()
     List<ReplicationController> replicationControllerList = loadReplicationControllers()
+    List<ReplicaSet> replicaSetList = loadReplicaSets()
+    List<ReplicaSetOrController> serverGroups = replicationControllerList.collect {
+      new ReplicaSetOrController(replicationController: it)
+    } + replicaSetList.collect {
+      new ReplicaSetOrController(replicaSet: it)
+    }
 
     def evictFromOnDemand = []
     def keepInOnDemand = []
 
     providerCache.getAll(Keys.Namespace.ON_DEMAND.ns,
-      replicationControllerList.collect { Keys.getServerGroupKey(accountName, namespace, it.metadata.name) }).each {
+      serverGroups.collect { Keys.getServerGroupKey(accountName, namespace, it.name) }).each {
       // Ensure that we don't overwrite data that was inserted by the `handle` method while we retrieved the
       // replication controllers. Furthermore, cache data that hasn't been processed needs to be updated in the ON_DEMAND
       // cache, so don't evict data without a processedCount > 0.
@@ -219,7 +238,7 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
       }
     }
 
-    def result = buildCacheResult(replicationControllerList, keepInOnDemand.collectEntries { [(it.id): it] }, evictFromOnDemand*.id, start)
+    def result = buildCacheResult(serverGroups, keepInOnDemand.collectEntries { [(it.id): it] }, evictFromOnDemand*.id, start)
 
     result.cacheResults[Keys.Namespace.ON_DEMAND.ns].each {
       it.attributes.processedTime = System.currentTimeMillis()
@@ -243,7 +262,7 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
     }
   }
 
-  private CacheResult buildCacheResult(List<ReplicationController> replicationControllers, Map<String, CacheData> onDemandKeep, List<String> onDemandEvict, Long start) {
+  private CacheResult buildCacheResult(List<ReplicaSetOrController> serverGroups, Map<String, CacheData> onDemandKeep, List<String> onDemandEvict, Long start) {
     log.info("Describing items in ${agentType}")
 
     Map<String, MutableCacheData> cachedApplications = MutableCacheData.mutableCacheMap()
@@ -252,31 +271,41 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
     Map<String, MutableCacheData> cachedInstances = MutableCacheData.mutableCacheMap()
     Map<String, MutableCacheData> cachedLoadBalancers = MutableCacheData.mutableCacheMap()
 
-    for (ReplicationController replicationController : replicationControllers) {
-      if (!replicationController) {
+    def rcEvents = [:]
+    def rsEvents = [:]
+    try {
+      rcEvents = credentials.apiAdaptor.getEvents(namespace, "ReplicationController")
+      rsEvents = credentials.apiAdaptor.getEvents(namespace, "ReplicaSet")
+    } catch (Exception e) {
+      log.warn "Failure fetching events for all server groups in $namespace", e
+    }
+
+    for (ReplicaSetOrController serverGroup: serverGroups) {
+      if (!serverGroup.exists()) {
         continue
       }
 
-      def onDemandData = onDemandKeep ? onDemandKeep[Keys.getServerGroupKey(accountName, namespace, replicationController.metadata.name)] : null
+      def onDemandData = onDemandKeep ? onDemandKeep[Keys.getServerGroupKey(accountName, namespace, serverGroup.name)] : null
 
       if (onDemandData && onDemandData.attributes.cacheTime >= start) {
-        Map<String, List<CacheData>> cacheResults = objectMapper.readValue(onDemandData.attributes.cacheResults as String, new TypeReference<Map<String, List<MutableCacheData>>>() { })
+        Map<String, List<CacheData>> cacheResults = objectMapper.readValue(onDemandData.attributes.cacheResults as String,
+                                                                           new TypeReference<Map<String, List<MutableCacheData>>>() { })
         cache(cacheResults, Keys.Namespace.APPLICATIONS.ns, cachedApplications)
         cache(cacheResults, Keys.Namespace.CLUSTERS.ns, cachedClusters)
         cache(cacheResults, Keys.Namespace.SERVER_GROUPS.ns, cachedServerGroups)
         cache(cacheResults, Keys.Namespace.INSTANCES.ns, cachedInstances)
       } else {
-        def replicationControllerName = replicationController.metadata.name
-        def pods = loadPods(replicationControllerName)
-        def names = Names.parseName(replicationControllerName)
+        def serverGroupName = serverGroup.name
+        def pods = loadPods(serverGroup)
+        def names = Names.parseName(serverGroupName)
         def applicationName = names.app
         def clusterName = names.cluster
 
-        def serverGroupKey = Keys.getServerGroupKey(accountName, namespace, replicationControllerName)
+        def serverGroupKey = Keys.getServerGroupKey(accountName, namespace, serverGroupName)
         def applicationKey = Keys.getApplicationKey(applicationName)
         def clusterKey = Keys.getClusterKey(accountName, applicationName, category, clusterName)
         def instanceKeys = []
-        def loadBalancerKeys = KubernetesUtil.getDescriptionLoadBalancers(replicationController).collect({
+        def loadBalancerKeys = serverGroup.loadBalancers.collect({
           Keys.getLoadBalancerKey(accountName, namespace, it)
         })
 
@@ -295,7 +324,7 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
         }
 
         pods.forEach { pod ->
-          def key = Keys.getInstanceKey(accountName, namespace, replicationControllerName, pod.metadata.name)
+          def key = Keys.getInstanceKey(accountName, namespace, pod.metadata.name)
           instanceKeys << key
           cachedInstances[key].with {
             relationships[Keys.Namespace.APPLICATIONS.ns].add(applicationKey)
@@ -313,8 +342,10 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
         }
 
         cachedServerGroups[serverGroupKey].with {
-          attributes.name = replicationControllerName
-          attributes.replicationController = replicationController
+          attributes.name = serverGroupName
+          attributes.replicationController = serverGroup.replicationController
+          attributes.replicaSet = serverGroup.replicaSet
+          attributes.events = serverGroup.replicationController ? rcEvents[serverGroupName] : rsEvents[serverGroupName]
           relationships[Keys.Namespace.APPLICATIONS.ns].add(applicationKey)
           relationships[Keys.Namespace.CLUSTERS.ns].add(clusterKey)
           relationships[Keys.Namespace.LOAD_BALANCERS.ns].addAll(loadBalancerKeys)
@@ -339,5 +370,26 @@ class KubernetesServerGroupCachingAgent implements CachingAgent, OnDemandAgent, 
       (Keys.Namespace.ON_DEMAND.ns): onDemandEvict,
     ])
 
+  }
+
+  class ReplicaSetOrController {
+    ReplicationController replicationController
+    ReplicaSet replicaSet
+
+    String getName() {
+      replicaSet ? replicaSet.metadata.name : replicationController.metadata.name
+    }
+
+    Map<String, String> getSelector() {
+      replicaSet ? replicaSet.spec.selector.matchLabels : replicationController.spec.selector
+    }
+
+    boolean exists() {
+      replicaSet || replicationController
+    }
+
+    List<String> getLoadBalancers() {
+      replicaSet ? KubernetesUtil.getLoadBalancers(replicaSet) : KubernetesUtil.getLoadBalancers(replicationController)
+    }
   }
 }

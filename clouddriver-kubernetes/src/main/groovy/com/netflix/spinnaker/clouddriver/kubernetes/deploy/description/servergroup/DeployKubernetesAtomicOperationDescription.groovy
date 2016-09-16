@@ -16,6 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.kubernetes.deploy.description.servergroup
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.netflix.spinnaker.clouddriver.deploy.DeployDescription
 import com.netflix.spinnaker.clouddriver.kubernetes.deploy.description.KubernetesAtomicOperationDescription
 import groovy.transform.AutoClone
@@ -40,10 +41,10 @@ class DeployKubernetesAtomicOperationDescription extends KubernetesAtomicOperati
 @Canonical
 class KubernetesContainerPort {
   String name
-  int containerPort
+  Integer containerPort
   String protocol
   String hostIp
-  int hostPort
+  Integer hostPort
 }
 
 @AutoClone
@@ -59,6 +60,7 @@ class KubernetesImageDescription {
 class KubernetesContainerDescription {
   String name
   KubernetesImageDescription imageDescription
+  KubernetesPullPolicy imagePullPolicy
 
   KubernetesResourceDescription requests
   KubernetesResourceDescription limits
@@ -80,7 +82,39 @@ class KubernetesContainerDescription {
 class KubernetesEnvVar {
   String name
   String value
-  // TODO(lwander) Q2 2016 add EnvVarSource for selecting secrets.
+  KubernetesEnvVarSource envSource
+}
+
+enum KubernetesPullPolicy {
+  @JsonProperty("IFNOTPRESENT")
+  IfNotPresent,
+
+  @JsonProperty("ALWAYS")
+  Always,
+
+  @JsonProperty("NEVER")
+  Never,
+}
+
+@AutoClone
+@Canonical
+class KubernetesEnvVarSource {
+  KubernetesSecretSource secretSource
+  KubernetesConfigMapSource configMapSource
+}
+
+@AutoClone
+@Canonical
+class KubernetesSecretSource {
+  String secretName
+  String key
+}
+
+@AutoClone
+@Canonical
+class KubernetesConfigMapSource {
+  String configMapName
+  String key
 }
 
 @AutoClone
@@ -92,11 +126,28 @@ class KubernetesVolumeMount {
 }
 
 enum KubernetesVolumeSourceType {
-  HOSTPATH, EMPTYDIR, PERSISTENTVOLUMECLAIM, SECRET, UNSUPPORTED
+  @JsonProperty("HOSTPATH")
+  HostPath,
+
+  @JsonProperty("EMPTYDIR")
+  EmptyDir,
+
+  @JsonProperty("PERSISTENTVOLUMECLAIM")
+  PersistentVolumeClaim,
+
+  @JsonProperty("SECRET")
+  Secret,
+
+  @JsonProperty("UNSUPPORTED")
+  Unsupported,
 }
 
 enum KubernetesStorageMediumType {
-  DEFAULT, MEMORY
+  @JsonProperty("DEFAULT")
+  Default,
+
+  @JsonProperty("MEMORY")
+  Memory,
 }
 
 @AutoClone

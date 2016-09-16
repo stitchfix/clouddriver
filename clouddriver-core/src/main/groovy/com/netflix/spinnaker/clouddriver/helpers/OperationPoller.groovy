@@ -1,8 +1,27 @@
+/*
+ * Copyright 2016 Netflix, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License")
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.netflix.spinnaker.clouddriver.helpers
 
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.exceptions.OperationTimedOutException
 import groovy.util.logging.Slf4j
+
+import java.util.function.Function
+import java.util.function.Predicate
 
 /**
  * A poller with an upper time limit combined with a Fibonacci-based backoff.
@@ -41,6 +60,24 @@ class OperationPoller {
                           Long timeoutSeconds, Task task, String resourceString, String basePhase) {
     return handleFinishedAsyncOperation(
         pollOperation(operation, ifDone, getTimeout(timeoutSeconds)), task, resourceString, basePhase)
+  }
+
+  static void retryWithBackoff(Function operation, long backOff, int maxRetries) {
+    int retries = 0
+    boolean succeeded = false
+    while (!succeeded) {
+      try {
+        operation.apply(null);
+        succeeded = true
+      } catch (Exception e) {
+        if (retries >= maxRetries) {
+          throw e
+        }
+        retries++
+        long timeout = Math.pow(2, retries) * backOff
+        Thread.sleep(timeout)
+      }
+    }
   }
 
   private long getTimeout(Long timeoutSeconds) {

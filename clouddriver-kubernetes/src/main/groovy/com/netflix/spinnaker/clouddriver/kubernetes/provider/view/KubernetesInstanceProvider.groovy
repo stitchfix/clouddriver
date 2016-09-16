@@ -22,6 +22,7 @@ import com.netflix.spinnaker.cats.cache.CacheData
 import com.netflix.spinnaker.clouddriver.kubernetes.cache.Keys
 import com.netflix.spinnaker.clouddriver.kubernetes.model.KubernetesInstance
 import com.netflix.spinnaker.clouddriver.model.InstanceProvider
+import io.fabric8.kubernetes.api.model.Event
 import io.fabric8.kubernetes.api.model.Pod
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
@@ -41,12 +42,9 @@ class KubernetesInstanceProvider implements InstanceProvider<KubernetesInstance>
 
   @Override
   KubernetesInstance getInstance(String account, String namespace, String name) {
-    Set<CacheData> instances = KubernetesProviderUtils.getAllMatchingKeyPattern(cacheView, Keys.Namespace.INSTANCES.ns, Keys.getInstanceKey(account, namespace, "*", name))
+    Set<CacheData> instances = KubernetesProviderUtils.getAllMatchingKeyPattern(cacheView, Keys.Namespace.INSTANCES.ns, Keys.getInstanceKey(account, namespace, name))
     if (!instances || instances.size() == 0) {
-      instances = KubernetesProviderUtils.getAllMatchingKeyPattern(cacheView, Keys.Namespace.PROCESSES.ns, Keys.getProcessKey(account, namespace, "*", name))
-      if (!instances || instances.size() == 0) {
-        return null
-      }
+      return null
     }
 
     if (instances.size() > 1) {
@@ -60,8 +58,13 @@ class KubernetesInstanceProvider implements InstanceProvider<KubernetesInstance>
     }
 
     def pod = objectMapper.convertValue(instanceData.attributes.pod, Pod)
+    def events = objectMapper.convertValue(instanceData.attributes.events, List)
 
-    return new KubernetesInstance(pod, loadBalancers)
+    events = events.collect { event ->
+      objectMapper.convertValue(event, Event)
+    }
+
+    return new KubernetesInstance(pod, loadBalancers, events)
   }
 
   @Override

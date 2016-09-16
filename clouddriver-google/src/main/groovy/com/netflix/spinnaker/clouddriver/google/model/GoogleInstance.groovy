@@ -24,6 +24,8 @@ import com.google.api.services.compute.model.Metadata
 import com.google.api.services.compute.model.NetworkInterface
 import com.google.api.services.compute.model.ServiceAccount
 import com.google.api.services.compute.model.Tags
+import com.netflix.spinnaker.clouddriver.consul.model.ConsulHealth
+import com.netflix.spinnaker.clouddriver.consul.model.ConsulNode
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
 import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
 import com.netflix.spinnaker.clouddriver.google.model.health.GoogleHealth
@@ -44,6 +46,7 @@ class GoogleInstance {
   String region
   GoogleInstanceHealth instanceHealth
   List<GoogleLoadBalancerHealth> loadBalancerHealths = []
+  ConsulNode consulNode
   List<NetworkInterface> networkInterfaces
   Metadata metadata
   List<Disk> disks
@@ -86,6 +89,7 @@ class GoogleInstance {
     String selfLink = GoogleInstance.this.selfLink
     String serverGroup = GoogleInstance.this.serverGroup
     Tags tags = GoogleInstance.this.tags
+    ConsulNode consulNode = GoogleInstance.this.consulNode
 
     List<Map<String, String>> getSecurityGroups() {
       GoogleInstance.this.securityGroups.collect {
@@ -100,6 +104,9 @@ class GoogleInstance {
       loadBalancerHealths.each { GoogleLoadBalancerHealth h ->
         healths << mapper.convertValue(h.view, new TypeReference<Map<String, Object>>() {})
       }
+      consulNode?.healths?.each { ConsulHealth h ->
+        healths << mapper.convertValue(h, new TypeReference<Map<String, Object>>() {})
+      }
       healths << mapper.convertValue(instanceHealth?.view, new TypeReference<Map<String, Object>>() {})
       healths
     }
@@ -112,6 +119,9 @@ class GoogleInstance {
       }
       if (instanceHealth) {
         allHealths << instanceHealth.view
+      }
+      consulNode?.healths?.each {
+        allHealths << it
       }
       allHealths
     }

@@ -31,7 +31,6 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Scope
 import org.springframework.stereotype.Component
 
-
 @Component
 @Configuration
 class OpenstackCredentialsInitializer implements CredentialsInitializerSynchronizable {
@@ -66,19 +65,22 @@ class OpenstackCredentialsInitializer implements CredentialsInitializerSynchroni
                                           openstackConfigurationProperties.accounts)
 
     accountsToAdd.each { OpenstackConfigurationProperties.ManagedAccount managedAccount ->
+      LOG.info("Found openstack managed account $managedAccount")
       try {
         def openstackAccount = new OpenstackNamedAccountCredentials(managedAccount.name,
                                                                     managedAccount.environment ?: managedAccount.name,
                                                                     managedAccount.accountType ?: managedAccount.name,
-                                                                    managedAccount.master,
                                                                     managedAccount.username,
                                                                     managedAccount.password,
-                                                                    managedAccount.tenantName,
+                                                                    managedAccount.projectName,
                                                                     managedAccount.domainName,
-                                                                    managedAccount.endpoint,
+                                                                    managedAccount.authUrl,
                                                                     managedAccount.regions,
-                                                                    managedAccount.insecure
+                                                                    managedAccount.insecure,
+                                                                    managedAccount.heatTemplatePath,
+                                                                    managedAccount.lbaas
                                                                     )
+        LOG.info("Saving openstack account $openstackAccount")
         accountCredentialsRepository.save(managedAccount.name, openstackAccount)
       } catch (e) {
         LOG.info "Could not load account ${managedAccount.name} for Openstack.", e

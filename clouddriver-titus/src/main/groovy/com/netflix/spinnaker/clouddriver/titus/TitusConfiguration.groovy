@@ -16,6 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.titus
 
+import com.netflix.spectator.api.Registry
 import com.netflix.spinnaker.clouddriver.security.AccountCredentialsRepository
 import com.netflix.spinnaker.clouddriver.titus.credentials.NetflixTitusCredentials
 import com.netflix.spinnaker.clouddriver.titus.deploy.handlers.TitusDeployHandler
@@ -61,14 +62,16 @@ class TitusConfiguration {
   @Bean(name = "netflixTitusCredentials")
   List<NetflixTitusCredentials> netflixTitusCredentials(TitusCredentialsConfig titusCredentialsConfig,
                                                         AccountCredentialsRepository repository,
-                                                        @Value('${titus.defaultBastionHostTemplate}') String defaultBastionHostTemplate) {
+                                                        @Value('${titus.defaultBastionHostTemplate}') String defaultBastionHostTemplate,
+                                                        @Value('${titus.awsVpc}') String awsVpc
+  ) {
     List<NetflixTitusCredentials> accounts = new ArrayList<>()
     for (TitusCredentialsConfig.Account account in titusCredentialsConfig.accounts) {
       List<TitusRegion> regions = account.regions.collect { new TitusRegion(it.name, account.name, it.endpoint) }
       if (!account.bastionHost && defaultBastionHostTemplate) {
         account.bastionHost = defaultBastionHostTemplate.replaceAll(Pattern.quote('{{environment}}'), account.environment)
       }
-      NetflixTitusCredentials credentials = new NetflixTitusCredentials(account.name, account.environment, account.accountType, regions, account.bastionHost, account.discoveryEnabled, account.discovery)
+      NetflixTitusCredentials credentials = new NetflixTitusCredentials(account.name, account.environment, account.accountType, regions, account.bastionHost, account.registry, account.awsAccount, awsVpc, account.discoveryEnabled, account.discovery)
       accounts.add(credentials)
       repository.save(account.name, credentials)
     }
@@ -77,12 +80,13 @@ class TitusConfiguration {
 
   @Bean
   @DependsOn("netflixTitusCredentials")
-  TitusClientProvider titusClientProvider(@Value('#{netflixTitusCredentials}') List<NetflixTitusCredentials> netflixTitusCredentials) {
+  TitusClientProvider titusClientProvider(
+    @Value('#{netflixTitusCredentials}') List<NetflixTitusCredentials> netflixTitusCredentials, Registry registry) {
     List<TitusClientProvider.TitusClientHolder> titusClientHolders = []
     netflixTitusCredentials.each { credentials ->
       credentials.regions.each { region ->
         titusClientHolders << new TitusClientProvider.TitusClientHolder(
-          credentials.name, region.name, new RegionScopedTitusClient(region)
+          credentials.name, region.name, new RegionScopedTitusClient(region, registry)
         )
       }
     }
@@ -98,6 +102,8 @@ class TitusConfiguration {
       String bastionHost
       Boolean discoveryEnabled
       String discovery
+      String awsAccount
+      String registry
       List<Region> regions
     }
 

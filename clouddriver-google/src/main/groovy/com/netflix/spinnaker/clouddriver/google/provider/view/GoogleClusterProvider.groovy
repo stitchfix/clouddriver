@@ -20,14 +20,14 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spinnaker.cats.cache.Cache
 import com.netflix.spinnaker.cats.cache.CacheData
 import com.netflix.spinnaker.cats.cache.RelationshipCacheFilter
+import com.netflix.spinnaker.clouddriver.consul.provider.ConsulProviderUtils
 import com.netflix.spinnaker.clouddriver.google.cache.Keys
-import com.netflix.spinnaker.clouddriver.google.model.GoogleApplication
-import com.netflix.spinnaker.clouddriver.google.model.GoogleCluster
-import com.netflix.spinnaker.clouddriver.google.model.GoogleInstance
-import com.netflix.spinnaker.clouddriver.google.model.GoogleLoadBalancer
-import com.netflix.spinnaker.clouddriver.google.model.GoogleSecurityGroup
-import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.model.*
+import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
 import com.netflix.spinnaker.clouddriver.google.model.health.GoogleLoadBalancerHealth
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleHttpLoadBalancer
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleLoadBalancer
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleLoadBalancerType
 import com.netflix.spinnaker.clouddriver.model.ClusterProvider
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
@@ -89,8 +89,13 @@ class GoogleClusterProvider implements ClusterProvider<GoogleCluster.View> {
   }
 
   @Override
-  GoogleCluster.View getCluster(String application, String account, String name) {
-    getClusters(application, account).find { it.name == name }
+  GoogleCluster.View getCluster(String applicationName, String accountName, String clusterName) {
+    CacheData clusterData = cacheView.get(
+      CLUSTERS.ns,
+      Keys.getClusterKey(accountName, applicationName, clusterName),
+      RelationshipCacheFilter.include(SERVER_GROUPS.ns))
+
+    return clusterData ? clusterFromCacheData(clusterData, true /* Include instance details */ ) : null
   }
 
   @Override
@@ -141,9 +146,20 @@ class GoogleClusterProvider implements ClusterProvider<GoogleCluster.View> {
     GoogleServerGroup serverGroup = objectMapper.convertValue(cacheData.attributes, GoogleServerGroup)
 
     def loadBalancerKeys = cacheData.relationships[LOAD_BALANCERS.ns]
-    List<GoogleLoadBalancer> loadBalancers = cacheView.getAll(LOAD_BALANCERS.ns, loadBalancerKeys).collect {
-      GoogleLoadBalancer loadBalancer = objectMapper.convertValue(it.attributes, GoogleLoadBalancer)
-      serverGroup.loadBalancers << loadBalancer
+    def loadBalancers = cacheView.getAll(LOAD_BALANCERS.ns, loadBalancerKeys).collect {
+      def loadBalancer = null
+      switch (it.attributes?.type) {
+        case GoogleLoadBalancerType.HTTP.toString():
+          loadBalancer = objectMapper.convertValue(it.attributes, GoogleHttpLoadBalancer)
+          break
+        case GoogleLoadBalancerType.NETWORK.toString():
+          loadBalancer = objectMapper.convertValue(it.attributes, GoogleLoadBalancer)
+          break
+        default:
+          loadBalancer = null
+          break
+      }
+      serverGroup.loadBalancers << loadBalancer.view
       loadBalancer
     }
 
@@ -163,6 +179,44 @@ class GoogleClusterProvider implements ClusterProvider<GoogleCluster.View> {
           instance.loadBalancerHealths = foundHealths
         }
       }
+    }
+
+    // Time to aggregate health states that can't be computed during the server group fetch operation.
+
+    // Health states for L7 load balancer.
+    def httpLoadBalancers = loadBalancers.findAll { it.type == GoogleLoadBalancerType.HTTP }
+    def httpDisabledStates = httpLoadBalancers.collect { loadBalancer ->
+        Utils.determineHttpLoadBalancerDisabledState(loadBalancer, serverGroup)
+    }
+
+    // Health states for Consul.
+    def consulNodes = serverGroup.instances?.collect { it.consulNode } ?: []
+    def consulDiscoverable = ConsulProviderUtils.consulServerGroupDiscoverable(consulNodes)
+    def consulDisabled = false
+    if (consulDiscoverable) {
+      consulDisabled = ConsulProviderUtils.serverGroupDisabled(consulNodes)
+    }
+
+    if (httpDisabledStates && httpDisabledStates.size() == loadBalancers.size()) {
+      // We have only L7.
+      serverGroup.disabled = httpDisabledStates.every { it }
+    } else if (httpDisabledStates) {
+      // We have a mix of L4 and L7.
+      serverGroup.disabled &= httpDisabledStates.every { it }
+    }
+
+    // Now that disabled is set based on L7 & L4 state, we need to take Consul into account.
+    if (consulDiscoverable) {
+      // If there are no load balancers to determine enable/disabled status we rely on Consul exclusively.
+      if (loadBalancers.size() == 0) {
+          serverGroup.disabled = true
+      }
+      // If the server group is disabled, but Consul isn't, we say the server group is discoverable.
+      // If the server group isn't disabled, but Consul is, we say the server group can be reached via load balancer.
+      // If the server group and Consul are both disabled, the server group remains disabled.
+      // If the server group and Consul are both not disabled, the server group is not disabled.
+      serverGroup.disabled &= consulDisabled
+      serverGroup.discovery = true
     }
 
     serverGroup

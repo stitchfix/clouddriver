@@ -23,7 +23,7 @@ import com.netflix.spinnaker.clouddriver.deploy.DeploymentResult
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.CloneOpenstackAtomicOperationDescription
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.DeployOpenstackAtomicOperationDescription
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackOperationException
-import com.netflix.spinnaker.clouddriver.openstack.domain.ServerGroupParameters
+import com.netflix.spinnaker.clouddriver.openstack.deploy.description.servergroup.ServerGroupParameters
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperation
 import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
 import org.openstack4j.model.heat.Stack
@@ -54,7 +54,7 @@ class CloneOpenstackAtomicOperation implements AtomicOperation<DeploymentResult>
       task.updateStatus BASE_PHASE, "Initializing cloning of server group ${description.source.serverGroupName}"
 
       DeployOpenstackAtomicOperation deployer = new DeployOpenstackAtomicOperation(newDescription)
-      deploymentResult = deployer.operate(priorOutputs) // right now this is null from deployOpenstackAtomicOperation
+      deploymentResult = deployer.operate(priorOutputs)
 
       task.updateStatus BASE_PHASE, "Finished cloning server group ${description.source.serverGroupName}"
     } catch (Exception e) {
@@ -88,15 +88,22 @@ class CloneOpenstackAtomicOperation implements AtomicOperation<DeploymentResult>
       instanceType = description.serverGroupParameters?.instanceType ?: ancestorParams.instanceType
       maxSize = description.serverGroupParameters?.maxSize ?: ancestorParams.maxSize
       minSize = description.serverGroupParameters?.minSize ?: ancestorParams.minSize
-      networkId = description.serverGroupParameters?.networkId ?: ancestorParams.networkId
-      poolId = description.serverGroupParameters?.poolId ?: ancestorParams.poolId
+      desiredSize = description.serverGroupParameters?.desiredSize ?: ancestorParams.desiredSize
+      subnetId = description.serverGroupParameters?.subnetId ?: ancestorParams.subnetId
+      loadBalancers = description.serverGroupParameters?.loadBalancers ?: ancestorParams.loadBalancers
       securityGroups = description.serverGroupParameters?.securityGroups ?: ancestorParams.securityGroups
+      autoscalingType = description.serverGroupParameters?.autoscalingType ?: ancestorParams.autoscalingType
+      scaleup = description.serverGroupParameters?.scaleup ?: ancestorParams.scaleup
+      scaledown = description.serverGroupParameters?.scaledown ?: ancestorParams.scaledown
+      tags = description.serverGroupParameters?.tags ?: ancestorParams.tags
     }
+    deployDescription.userDataType = description.userDataType ?: ancestorParams.sourceUserDataType
+    deployDescription.userData = description.userData ?: ancestorParams.sourceUserData
     deployDescription.disableRollback = description.disableRollback ?: false
     deployDescription.timeoutMins = description.timeoutMins ?: ancestorStack.timeoutMins
     deployDescription.region = description.region
 
-    task.updateStatus BASE_PHASE, "Finished reating new server group description"
+    task.updateStatus BASE_PHASE, "Finished creating new server group description"
 
     deployDescription
   }

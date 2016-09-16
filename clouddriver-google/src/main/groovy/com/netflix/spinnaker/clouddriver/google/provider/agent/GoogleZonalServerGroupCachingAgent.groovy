@@ -22,12 +22,7 @@ import com.google.api.client.googleapis.batch.BatchRequest
 import com.google.api.client.googleapis.batch.json.JsonBatchCallback
 import com.google.api.client.googleapis.json.GoogleJsonError
 import com.google.api.client.http.HttpHeaders
-import com.google.api.services.compute.model.Autoscaler
-import com.google.api.services.compute.model.AutoscalersScopedList
-import com.google.api.services.compute.model.InstanceGroupManager
-import com.google.api.services.compute.model.InstanceGroupManagerList
-import com.google.api.services.compute.model.InstanceGroupsListInstancesRequest
-import com.google.api.services.compute.model.InstanceWithNamedPorts
+import com.google.api.services.compute.model.*
 import com.netflix.frigga.Names
 import com.netflix.frigga.ami.AppVersion
 import com.netflix.spectator.api.Registry
@@ -44,6 +39,7 @@ import com.netflix.spinnaker.clouddriver.google.cache.Keys
 import com.netflix.spinnaker.clouddriver.google.model.GoogleInstance
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
 import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.GoogleHttpLoadBalancingPolicy
 import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
 import groovy.transform.Canonical
 import groovy.util.logging.Slf4j
@@ -57,11 +53,15 @@ import static com.netflix.spinnaker.clouddriver.google.cache.Keys.Namespace.*
 @Slf4j
 class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent implements OnDemandAgent {
 
+  static final String GLOBAL_LOAD_BALANCER_NAMES = GoogleServerGroup.View.GLOBAL_LOAD_BALANCER_NAMES
+  static final String REGIONAL_LOAD_BALANCER_NAMES = GoogleServerGroup.View.REGIONAL_LOAD_BALANCER_NAMES
+  static final String BACKEND_SERVICE_NAMES = GoogleServerGroup.View.BACKEND_SERVICE_NAMES
+  static final String LOAD_BALANCING_POLICY = GoogleServerGroup.View.LOAD_BALANCING_POLICY
   final String region
 
   final Set<AgentDataType> providedDataTypes = [
     AUTHORITATIVE.forType(SERVER_GROUPS.ns),
-    INFORMATIVE.forType(APPLICATIONS.ns),
+    AUTHORITATIVE.forType(APPLICATIONS.ns),
     INFORMATIVE.forType(CLUSTERS.ns),
     INFORMATIVE.forType(INSTANCES.ns),
     INFORMATIVE.forType(LOAD_BALANCERS.ns),
@@ -217,7 +217,7 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
       evictions[SERVER_GROUPS.ns].addAll(identifiers)
     }
 
-    log.info("On demand cache refresh succeeded. Data: ${data}")
+    log.info("On demand cache refresh succeeded. Data: ${data}. Added ${serverGroup ? 1 : 0} items to the cache.")
 
     return new OnDemandAgent.OnDemandResult(
         sourceAgentType: getOnDemandAgentType(),
@@ -282,11 +282,7 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
       }
       serverGroup.instances.clear()
 
-      serverGroup.asg.loadBalancerNames.each { String loadBalancerName ->
-        loadBalancerKeys << Keys.getLoadBalancerKey(region,
-                                                    accountName,
-                                                    loadBalancerName)
-      }
+      populateLoadBalancerKeys(serverGroup, loadBalancerKeys, accountName, region)
 
       loadBalancerKeys.each { String loadBalancerKey ->
         cacheResultBuilder.namespace(LOAD_BALANCERS.ns).keep(loadBalancerKey).with {
@@ -416,16 +412,21 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
     GoogleServerGroup buildServerGroupFromInstanceGroupManager(InstanceGroupManager instanceGroupManager) {
       String zone = Utils.getLocalName(instanceGroupManager.zone)
 
+      Map<String, Integer> namedPorts = [:]
+      instanceGroupManager.namedPorts.each { namedPorts[(it.name)] = it.port }
       return new GoogleServerGroup(
           name: instanceGroupManager.name,
           region: region,
           zone: zone,
+          namedPorts: namedPorts,
           zones: [zone],
+          selfLink: instanceGroupManager.selfLink,
           currentActions: instanceGroupManager.currentActions,
           launchConfig: [createdTime: Utils.getTimeFromTimestamp(instanceGroupManager.creationTimestamp)],
           asg: [minSize        : instanceGroupManager.targetSize,
                 maxSize        : instanceGroupManager.targetSize,
-                desiredCapacity: instanceGroupManager.targetSize]
+                desiredCapacity: instanceGroupManager.targetSize],
+          autoHealingPolicy: instanceGroupManager.autoHealingPolicies?.getAt(0)
       )
     }
 
@@ -474,8 +475,6 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
 
   class InstanceTemplatesCallback<InstanceTemplate> extends JsonBatchCallback<InstanceTemplate> implements FailureLogger {
 
-    private static final String LOAD_BALANCER_NAMES = "load-balancer-names"
-
     ProviderCache providerCache
     GoogleServerGroup serverGroup
     List<String> loadBalancerNames
@@ -507,17 +506,56 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
       }
 
       def instanceMetadata = instanceTemplate?.properties?.metadata
-      if (instanceMetadata) {
-        def metadataMap = Utils.buildMapFromMetadata(instanceMetadata)
-        def loadBalancerNameList = metadataMap?.get(LOAD_BALANCER_NAMES)?.split(",")
-        if (loadBalancerNameList) {
-          serverGroup.asg.loadBalancerNames = loadBalancerNameList
+      setLoadBalancerMetadataOnInstance(loadBalancerNames, instanceMetadata, serverGroup, objectMapper)
+    }
+  }
 
-          // The isDisabled property of a server group is set based on whether there are associated target pools,
-          // and whether the metadata of the server group contains a list of load balancers to actually associate
-          // the server group with.
-          serverGroup.setDisabled(loadBalancerNames.empty)
-        }
+  static void populateLoadBalancerKeys(GoogleServerGroup serverGroup, List<String> loadBalancerKeys, String accountName, String region) {
+    serverGroup.asg.get(REGIONAL_LOAD_BALANCER_NAMES).each { String loadBalancerName ->
+      loadBalancerKeys << Keys.getLoadBalancerKey(region, accountName, loadBalancerName)
+    }
+    serverGroup.asg.get(GLOBAL_LOAD_BALANCER_NAMES).each { String loadBalancerName ->
+      loadBalancerKeys << Keys.getLoadBalancerKey("global", accountName, loadBalancerName)
+    }
+  }
+
+  /**
+   * Set load balancing metadata on the server group from the instance template.
+   *
+   * @param loadBalancerNames -- Network load balancer names specified by target pools.
+   * @param instanceMetadata -- Metadata associated with the instance template.
+   * @param serverGroup -- Server groups built from the instance template.
+   */
+  static void setLoadBalancerMetadataOnInstance(List<String> loadBalancerNames,
+                                                Metadata instanceMetadata,
+                                                GoogleServerGroup serverGroup,
+                                                ObjectMapper objectMapper) {
+    if (instanceMetadata) {
+      def metadataMap = Utils.buildMapFromMetadata(instanceMetadata)
+      def regionalLBNameList = metadataMap?.get(REGIONAL_LOAD_BALANCER_NAMES)?.split(",")
+      def globalLBNameList = metadataMap?.get(GLOBAL_LOAD_BALANCER_NAMES)?.split(",")
+      def backendServiceList = metadataMap?.get(BACKEND_SERVICE_NAMES)?.split(",")
+      def policyJson = metadataMap?.get(LOAD_BALANCING_POLICY)
+
+      if (globalLBNameList) {
+        serverGroup.asg.put(GLOBAL_LOAD_BALANCER_NAMES, globalLBNameList)
+      }
+      if (backendServiceList) {
+        serverGroup.asg.put(BACKEND_SERVICE_NAMES, backendServiceList)
+      }
+      if (policyJson) {
+        serverGroup.asg.put(LOAD_BALANCING_POLICY, objectMapper.readValue(policyJson, GoogleHttpLoadBalancingPolicy))
+      }
+
+      if (regionalLBNameList) {
+        serverGroup.asg.put(REGIONAL_LOAD_BALANCER_NAMES, regionalLBNameList)
+
+        // The isDisabled property of a server group is set based on whether there are associated target pools,
+        // and whether the metadata of the server group contains a list of load balancers to actually associate
+        // the server group with.
+        // We set the disabled state for L4 lBs here (before writing into the cache) and calculate
+        // the L7 disabled state when we read the server groups from the cache.
+        serverGroup.setDisabled(loadBalancerNames.empty)
       }
     }
   }
@@ -576,6 +614,8 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
     @Override
     void onSuccess(Autoscaler autoscaler, HttpHeaders responseHeaders) throws IOException {
       serverGroup.autoscalingPolicy = autoscaler.getAutoscalingPolicy()
+      serverGroup.asg.minSize = serverGroup.autoscalingPolicy.minNumReplicas
+      serverGroup.asg.maxSize = serverGroup.autoscalingPolicy.maxNumReplicas
     }
   }
 
@@ -598,6 +638,8 @@ class GoogleZonalServerGroupCachingAgent extends AbstractGoogleCachingAgent impl
 
             if (serverGroup) {
               serverGroup.autoscalingPolicy = autoscaler.getAutoscalingPolicy()
+              serverGroup.asg.minSize = serverGroup.autoscalingPolicy.minNumReplicas
+              serverGroup.asg.maxSize = serverGroup.autoscalingPolicy.maxNumReplicas
             }
           }
         }

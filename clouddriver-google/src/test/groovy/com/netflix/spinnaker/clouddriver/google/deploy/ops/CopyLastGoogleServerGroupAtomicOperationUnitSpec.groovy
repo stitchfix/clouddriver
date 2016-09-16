@@ -31,6 +31,7 @@ import com.netflix.spinnaker.clouddriver.google.deploy.GCEUtil
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BaseGoogleInstanceDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.handlers.BasicGoogleDeployHandler
+import com.netflix.spinnaker.clouddriver.google.model.GoogleAutoscalingPolicy
 import com.netflix.spinnaker.clouddriver.google.model.GoogleDisk
 import com.netflix.spinnaker.clouddriver.google.model.GoogleSecurityGroup
 import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
@@ -128,12 +129,14 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
 
     serverGroup = new GoogleServerGroup(name: ANCESTOR_SERVER_GROUP_NAME,
                                         zone: ZONE,
-                                        asg: [desiredCapacity: 2,
-                                              loadBalancerNames: LOAD_BALANCERS],
+                                        asg: [(GoogleServerGroup.View.REGIONAL_LOAD_BALANCER_NAMES): LOAD_BALANCERS,
+                                            desiredCapacity: 2],
                                         launchConfig: [instanceTemplate: instanceTemplate],
                                         autoscalingPolicy: [coolDownPeriodSec: 45,
                                                             minNumReplicas: 2,
-                                                            maxNumReplicas: 5]).view
+                                                            maxNumReplicas: 5],
+                                        autoHealingPolicy: [healthCheck: 'some-health-check',
+                                                            initialDelaySec: 600]).view
   }
 
   @Unroll
@@ -146,6 +149,7 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
                                                          instanceType: "n1-standard-8",
                                                          disks: [new GoogleDisk(type: "pd-ssd", sizeGb: 250)],
                                                          regional: false,
+                                                         region: REGION,
                                                          zone: ZONE,
                                                          instanceMetadata: ["differentKey": "differentValue"],
                                                          tags: ["new-tag-1", "new-tag-2"],
@@ -159,11 +163,16 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
                                                          loadBalancers: ["testlb-west-1", "testlb-west-2"],
                                                          securityGroups: ["sg-3", "sg-4"] as Set,
                                                          autoscalingPolicy:
-                                                            new BasicGoogleDeployDescription.AutoscalingPolicy(
-                                                                coolDownPeriodSec: 90,
-                                                                minNumReplicas: 5,
-                                                                maxNumReplicas: 9
-                                                            ),
+                                                             new GoogleAutoscalingPolicy(
+                                                                 coolDownPeriodSec: 90,
+                                                                 minNumReplicas: 5,
+                                                                 maxNumReplicas: 9
+                                                             ),
+                                                         autoHealingPolicy:
+                                                             new BasicGoogleDeployDescription.AutoHealingPolicy(
+                                                                 healthCheck: 'different-health-check',
+                                                                 initialDelaySec: 900
+                                                             ),
                                                          source: [region: REGION,
                                                                   serverGroupName: ANCESTOR_SERVER_GROUP_NAME],
                                                          accountName: ACCOUNT_NAME,
@@ -196,6 +205,7 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
     setup:
       def description = new BasicGoogleDeployDescription(source: [region: REGION,
                                                                   serverGroupName: ANCESTOR_SERVER_GROUP_NAME],
+                                                         region: REGION,
                                                          accountName: ACCOUNT_NAME,
                                                          credentials: credentials)
       def googleClusterProviderMock = Mock(GoogleClusterProvider)
@@ -209,6 +219,7 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
       newDescription.instanceType = INSTANCE_TYPE
       newDescription.disks = [DISK_PD_STANDARD]
       newDescription.regional = false
+      newDescription.region = REGION
       newDescription.zone = ZONE
       newDescription.instanceMetadata = INSTANCE_METADATA
       newDescription.tags = TAGS
@@ -221,9 +232,12 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
       newDescription.subnet = SUBNET_NAME
       newDescription.loadBalancers = LOAD_BALANCERS
       newDescription.securityGroups = SECURITY_GROUPS
-      newDescription.autoscalingPolicy = new BasicGoogleDeployDescription.AutoscalingPolicy(coolDownPeriodSec: 45,
-                                                                                            minNumReplicas: 2,
-                                                                                            maxNumReplicas: 5)
+      newDescription.autoscalingPolicy = new GoogleAutoscalingPolicy(coolDownPeriodSec: 45,
+                                                                     minNumReplicas: 2,
+                                                                     maxNumReplicas: 5)
+      newDescription.autoHealingPolicy = new BasicGoogleDeployDescription.AutoHealingPolicy(healthCheck: 'some-health-check',
+                                                                                            initialDelaySec: 600)
+
       def deploymentResult = new DeploymentResult(serverGroupNames: ["$REGION:$NEW_SERVER_GROUP_NAME"])
       @Subject def operation = new CopyLastGoogleServerGroupAtomicOperation(description)
       operation.googleClusterProvider = googleClusterProviderMock
@@ -248,6 +262,7 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
     setup:
       def description = new BasicGoogleDeployDescription(source: [region: REGION,
                                                                   serverGroupName: ANCESTOR_SERVER_GROUP_NAME],
+                                                         region: REGION,
                                                          securityGroups: [SECURITY_GROUP_2],
                                                          accountName: ACCOUNT_NAME,
                                                          credentials: credentials)
@@ -282,6 +297,7 @@ class CopyLastGoogleServerGroupAtomicOperationUnitSpec extends Specification {
     setup:
       def description = new BasicGoogleDeployDescription(source: [region: REGION,
                                                                   serverGroupName: ANCESTOR_SERVER_GROUP_NAME],
+                                                         region: REGION,
                                                          securityGroups: [],
                                                          accountName: ACCOUNT_NAME,
                                                          credentials: credentials)

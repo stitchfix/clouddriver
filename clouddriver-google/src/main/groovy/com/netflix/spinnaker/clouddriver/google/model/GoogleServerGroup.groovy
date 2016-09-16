@@ -21,7 +21,9 @@ import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonTypeInfo
 import com.google.api.services.compute.model.AutoscalingPolicy
 import com.google.api.services.compute.model.InstanceGroupManagerActionsSummary
+import com.google.api.services.compute.model.InstanceGroupManagerAutoHealingPolicy
 import com.netflix.spinnaker.clouddriver.google.GoogleCloudProvider
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.*
 import com.netflix.spinnaker.clouddriver.model.HealthState
 import com.netflix.spinnaker.clouddriver.model.Instance
 import com.netflix.spinnaker.clouddriver.model.ServerGroup
@@ -39,9 +41,11 @@ class GoogleServerGroup {
   Set health = []
   Map<String, Object> launchConfig = [:]
   Map<String, Object> asg = [:]
+  Map<String, Integer> namedPorts = [:]
   Set<String> securityGroups = []
   Map buildInfo
   Boolean disabled = false
+  Boolean discovery = false
   String networkName
   Set<String> instanceTemplateTags = []
   String selfLink
@@ -50,9 +54,12 @@ class GoogleServerGroup {
   @JsonTypeInfo(use=JsonTypeInfo.Id.CLASS, include=JsonTypeInfo.As.PROPERTY, property="class")
   AutoscalingPolicy autoscalingPolicy
 
+  @JsonTypeInfo(use=JsonTypeInfo.Id.CLASS, include=JsonTypeInfo.As.PROPERTY, property="class")
+  InstanceGroupManagerAutoHealingPolicy autoHealingPolicy
+
   // Non-serialized values built up by providers
   @JsonIgnore
-  Set<GoogleLoadBalancer> loadBalancers = []
+  Set<GoogleLoadBalancerView> loadBalancers = []
 
   @JsonIgnore
   View getView() {
@@ -63,6 +70,10 @@ class GoogleServerGroup {
   @Canonical
   class View implements ServerGroup {
     final String type = GoogleCloudProvider.GCE
+    static final String REGIONAL_LOAD_BALANCER_NAMES = "load-balancer-names"
+    static final String GLOBAL_LOAD_BALANCER_NAMES = "global-load-balancer-names"
+    static final String BACKEND_SERVICE_NAMES = "backend-service-names"
+    static final String LOAD_BALANCING_POLICY = "load-balancing-policy"
 
     String name = GoogleServerGroup.this.name
     String region = GoogleServerGroup.this.region
@@ -72,14 +83,17 @@ class GoogleServerGroup {
     Set<GoogleInstance.View> instances = GoogleServerGroup.this.instances.collect { it?.view }
     Map<String, Object> asg = GoogleServerGroup.this.asg
     Map<String, Object> launchConfig = GoogleServerGroup.this.launchConfig
+    Map<String, Integer> namedPorts = GoogleServerGroup.this.namedPorts
     Set<String> securityGroups = GoogleServerGroup.this.securityGroups
     Map buildInfo = GoogleServerGroup.this.buildInfo
     Boolean disabled = GoogleServerGroup.this.disabled
     String networkName = GoogleServerGroup.this.networkName
     Set<String> instanceTemplateTags = GoogleServerGroup.this.instanceTemplateTags
     String selfLink = GoogleServerGroup.this.selfLink
+    Boolean discovery = GoogleServerGroup.this.discovery
     InstanceGroupManagerActionsSummary currentActions = GoogleServerGroup.this.currentActions
     AutoscalingPolicy autoscalingPolicy = GoogleServerGroup.this.autoscalingPolicy
+    InstanceGroupManagerAutoHealingPolicy autoHealingPolicy = GoogleServerGroup.this.autoHealingPolicy
 
     @Override
     Boolean isDisabled() { // Because groovy isn't smart enough to generate this method :-(
@@ -101,12 +115,25 @@ class GoogleServerGroup {
           null
     }
 
+    /**
+     * @return The load balancing policy containing the capacity metrics and named ports this server
+     * group is configured with for all L7 backends.
+     *
+     * This is intended to to be used as the suggestion in the server group wizard for load balancing policy.
+     */
+    GoogleHttpLoadBalancingPolicy getLoadBalancingPolicy() {
+      return GoogleServerGroup.this.asg?.get(LOAD_BALANCING_POLICY) as GoogleHttpLoadBalancingPolicy
+    }
+
     @Override
     Set<String> getLoadBalancers() {
       Set<String> loadBalancerNames = []
       def asg = GoogleServerGroup.this.asg
-      if (asg && asg.containsKey("loadBalancerNames")) {
-        loadBalancerNames = (Set<String>) asg.loadBalancerNames
+      if (asg?.containsKey(REGIONAL_LOAD_BALANCER_NAMES)) {
+        loadBalancerNames.addAll(asg.get(REGIONAL_LOAD_BALANCER_NAMES) as Set<String>)
+      }
+      if (asg?.containsKey(GLOBAL_LOAD_BALANCER_NAMES)) {
+        loadBalancerNames.addAll(asg.get(GLOBAL_LOAD_BALANCER_NAMES) as Set<String>)
       }
       return loadBalancerNames
     }

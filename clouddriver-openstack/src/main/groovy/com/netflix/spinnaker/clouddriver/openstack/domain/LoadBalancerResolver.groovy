@@ -19,31 +19,85 @@ package com.netflix.spinnaker.clouddriver.openstack.domain
 import java.util.regex.Matcher
 import java.util.regex.Pattern
 
-
+/**
+ * Load balancer descriptions are used to store the created_time for a load balancer.
+ *
+ * It is a key value pair.
+ *
+ * For example:
+ *
+ * {@code created_time=12345678}
+ *
+ * Load balancer listener descriptions are used to store external protocol and ports.
+ *
+ * For example:
+ *
+ * {@code HTTP:80:8080}
+ */
 trait LoadBalancerResolver {
-  final String nameRegex = "(\\w+)-(\\w+)-(\\w+)"
-  final Pattern namePattern = Pattern.compile(nameRegex)
-  final String descriptionRegex = ".*internal_port=([0-9]+).*"
-  final Pattern descriptionPattern = Pattern.compile(descriptionRegex)
 
-  String getBaseName(final String derivedName) {
-    String result = null
-    if (derivedName) {
-      Matcher matcher = namePattern.matcher(derivedName)
+  final String createdRegex = ".*created_time=([0-9]+).*"
+  final Pattern createdPattern = Pattern.compile(createdRegex)
 
-      if (matcher.matches() && matcher.groupCount() == 3) {
-        result = matcher.group(1)
-      }
+  /**
+   * Generate key=value port string, e.g. internal_port
+   * @param port
+   * @return
+   */
+  String getListenerKey(String externalProtocol, int externalPort, int port) {
+    "${externalProtocol}:${externalPort}:${port}"
+  }
+
+  Map<String, String> parseListenerKey(String key) {
+    Map<String, String> result = [:]
+
+    String[] parts = key?.split(':')
+
+    if (parts?.length == 3) {
+      result << [externalProtocol: parts[0], externalPort: parts[1], internalPort: parts[2]]
     }
+
     result
   }
 
-  int getInternalPort(final String description) {
-    int result = -1
-    if (description) {
-      Matcher matcher = descriptionPattern.matcher(description)
+
+
+  /**
+   * Parse the created time from a load balancer description in the following format.
+   * <br><br>
+   * {@code
+   *  ...,created_time=12345678,...
+   * }
+   * @param description
+   * @return the port value
+   */
+  Long parseCreatedTime(final String description) {
+    String s = match(description, createdPattern)
+    s ? s.toLong() : null
+  }
+
+  /**
+   * Generate key=value createdTime string, e.g. created_time=12345678
+   * @param time
+   * @return
+   */
+  String generateCreatedTime(long time) {
+    "created_time=${time}"
+  }
+
+  /**
+   * Match a pattern in the comma-separated fields of the description
+   * @param description
+   * @param pattern
+   * @return
+   */
+  String match(final String description, final Pattern pattern) {
+    String result = null
+    for (String s : description?.split(',')) {
+      Matcher matcher = pattern.matcher(s)
       if (matcher.matches() && matcher.groupCount() == 1) {
-        result = matcher.group(1).toInteger()
+        result = matcher.group(1)
+        break
       }
     }
     result

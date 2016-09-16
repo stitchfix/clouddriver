@@ -17,31 +17,53 @@ package com.netflix.spinnaker.clouddriver.openstack.deploy.ops.loadbalancer
 
 import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.data.task.TaskRepository
+import com.netflix.spinnaker.clouddriver.openstack.client.BlockingStatusChecker
 import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackClientProvider
 import com.netflix.spinnaker.clouddriver.openstack.client.OpenstackProviderFactory
+import com.netflix.spinnaker.clouddriver.openstack.config.OpenstackConfigurationProperties.LbaasConfig
 import com.netflix.spinnaker.clouddriver.openstack.deploy.description.loadbalancer.OpenstackLoadBalancerDescription
+import com.netflix.spinnaker.clouddriver.openstack.deploy.description.loadbalancer.OpenstackLoadBalancerDescription.Algorithm
+import com.netflix.spinnaker.clouddriver.openstack.deploy.description.loadbalancer.OpenstackLoadBalancerDescription.Listener
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackOperationException
 import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackProviderException
-import com.netflix.spinnaker.clouddriver.openstack.domain.LoadBalancerPool
-import com.netflix.spinnaker.clouddriver.openstack.domain.PoolHealthMonitor
-import com.netflix.spinnaker.clouddriver.openstack.domain.PoolHealthMonitorType
-import com.netflix.spinnaker.clouddriver.openstack.domain.VirtualIP
+import com.netflix.spinnaker.clouddriver.openstack.deploy.exception.OpenstackResourceNotFoundException
+import com.netflix.spinnaker.clouddriver.openstack.domain.HealthMonitor
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackCredentials
 import com.netflix.spinnaker.clouddriver.openstack.security.OpenstackNamedAccountCredentials
-import com.netflix.spinnaker.clouddriver.orchestration.AtomicOperations
+import com.netflix.spinnaker.clouddriver.openstack.task.TaskStatusAware
 import org.openstack4j.model.compute.FloatingIP
 import org.openstack4j.model.network.NetFloatingIP
-import org.openstack4j.model.network.ext.HealthMonitor
+import org.openstack4j.model.network.Network
+import org.openstack4j.model.network.Port
+import org.openstack4j.model.network.Subnet
 import org.openstack4j.model.network.ext.HealthMonitorType
-import org.openstack4j.model.network.ext.LbPool
-import org.openstack4j.model.network.ext.Vip
+import org.openstack4j.model.network.ext.HealthMonitorV2
+import org.openstack4j.model.network.ext.LbMethod
+import org.openstack4j.model.network.ext.LbPoolV2
+import org.openstack4j.model.network.ext.LbProvisioningStatus
+import org.openstack4j.model.network.ext.ListenerV2
+import org.openstack4j.model.network.ext.LoadBalancerV2
+import org.openstack4j.openstack.networking.domain.ext.ListItem
+import spock.lang.Shared
 import spock.lang.Specification
-import spock.lang.Subject
+import spock.lang.Unroll
 
-class UpsertOpenstackLoadBalancerAtomicOperationSpec extends Specification {
-  def provider
-  def credentials
-  def description
+@Unroll
+class UpsertOpenstackLoadBalancerAtomicOperationSpec extends Specification implements TaskStatusAware {
+  OpenstackClientProvider provider
+  OpenstackCredentials credentials
+  OpenstackLoadBalancerDescription description
+
+  @Shared
+  String region = 'region'
+  @Shared
+  String account = 'test'
+  @Shared
+  String opName = UPSERT_LOADBALANCER_PHASE
+  @Shared
+  Throwable openstackProviderException = new OpenstackProviderException('foo')
+  @Shared
+  BlockingStatusChecker blockingClientAdapter = BlockingStatusChecker.from(60, 5) { true }
 
   def setupSpec() {
     TaskRepository.threadLocalTask.set(Mock(Task))
@@ -50,515 +72,604 @@ class UpsertOpenstackLoadBalancerAtomicOperationSpec extends Specification {
   def setup() {
     provider = Mock(OpenstackClientProvider)
     GroovyMock(OpenstackProviderFactory, global: true)
-    OpenstackNamedAccountCredentials credz = Mock(OpenstackNamedAccountCredentials)
+    OpenstackNamedAccountCredentials credz = new OpenstackNamedAccountCredentials("name", "test", "main", "user", "pw", "tenant", "domain", "endpoint", [], false, "", new LbaasConfig(pollTimeout: 60, pollInterval: 5))
     OpenstackProviderFactory.createProvider(credz) >> { provider }
     credentials = new OpenstackCredentials(credz)
-    description = new OpenstackLoadBalancerDescription(credentials: credentials)
+    description = new OpenstackLoadBalancerDescription(credentials: credentials, region: region, account: account)
   }
 
-  def "should create load balancer"() {
+  def "operate - create load balancer"() {
     given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    String newPoolId = UUID.randomUUID().toString()
-    @Subject def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
-    LbPool lbPool = Mock(LbPool)
+    description.with {
+      name = 'name'
+      subnetId = UUID.randomUUID()
+      algorithm = Algorithm.ROUND_ROBIN
+      listeners = [new Listener(externalPort: 80, externalProtocol: 'HTTP', internalPort: 8080)]
+    }
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+    LoadBalancerV2 loadBalancer = Stub(LoadBalancerV2) {
+      getId() >> '123'
+      getVipPortId() >> '321'
+    }
 
     when:
     Map result = operation.operate([])
 
     then:
-    1 * operation.createLoadBalancer(description.region, description.subnetId, _, _, description.healthMonitor) >> lbPool
-    1 * lbPool.id >> newPoolId
-    result == [(description.region): [id: newPoolId]]
-  }
-
-  def "should create load balancer exception"() {
-    given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    @Subject def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
-    Throwable throwable = new OpenstackProviderException('foo')
-
-    when:
-    operation.operate([])
-
-    then:
-    1 * operation.createLoadBalancer(description.region, description.subnetId, _, _, description.healthMonitor) >> {
-      throw throwable
+    1 * operation.validatePeripherals(region, description.subnetId, description.networkId, description.securityGroups) >> {
     }
-    OpenstackOperationException openstackOperationException = thrown(OpenstackOperationException)
-    openstackOperationException.cause == throwable
+    1 * operation.createLoadBalancer(region, description.name, description.subnetId) >> loadBalancer
+    1 * operation.buildListenerMap(region, loadBalancer) >> [:]
+    1 * operation.addListenersAndPools(region, loadBalancer.id, description.name, description.algorithm, _, description.healthMonitor) >> {
+    }
+    1 * operation.updateFloatingIp(region, description.networkId, loadBalancer.vipPortId)
+    1 * operation.updateSecurityGroups(region, loadBalancer.vipPortId, description.securityGroups)
+    0 * operation.updateServerGroup(opName, region, loadBalancer.id)
+
+    and:
+    result == [(description.region): [id: loadBalancer.id]]
   }
 
-  def "should update load balancer"() {
+  def "operate - add / remove load balancer listener pools"() {
     given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    description.id = UUID.randomUUID().toString()
-    @Subject def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
-    LbPool existingPool = Mock(LbPool)
+    description.with {
+      name = 'name'
+      id = UUID.randomUUID()
+      subnetId = UUID.randomUUID()
+      algorithm = Algorithm.ROUND_ROBIN
+      listeners = [new Listener(externalPort: 80, externalProtocol: 'HTTP', internalPort: 8080)]
+    }
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+    LoadBalancerV2 loadBalancer = Stub(LoadBalancerV2) {
+      getId() >> '123'
+      getVipPortId() >> '321'
+    }
+    ListenerV2 listenerV2 = Mock(ListenerV2)
 
     when:
     Map result = operation.operate([])
 
     then:
-    1 * operation.updateLoadBalancer(description.region, _, _, description.healthMonitor) >> existingPool
-    1 * existingPool.id >> description.id
-    result == [(description.region): [id: description.id]]
+    0 * operation.validatePeripherals(region, description.subnetId, description.networkId, description.securityGroups) >> {
+    }
+    1 * provider.getLoadBalancer(region, description.id) >> loadBalancer
+    1 * operation.buildListenerMap(region, loadBalancer) >> ['HTTPS:443:HTTPS:8181': listenerV2]
+    1 * operation.addListenersAndPools(region, loadBalancer.id, description.name, description.algorithm, _, description.healthMonitor) >> {
+    }
+    1 * operation.deleteLoadBalancerPeripherals(opName, region, loadBalancer.id, _ as Collection) >> {}
+    1 * operation.updateFloatingIp(region, description.networkId, loadBalancer.vipPortId)
+    1 * operation.updateSecurityGroups(region, loadBalancer.vipPortId, description.securityGroups)
+    1 * operation.updateServerGroup(_ as String, region, loadBalancer.id)
+
+    and:
+    result == [(description.region): [id: loadBalancer.id]]
   }
 
-  def "should update load balancer exception"() {
+  def "operate - update load balancer listener pools"() {
     given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    description.id = UUID.randomUUID().toString()
-    @Subject def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
-    Throwable throwable = new OpenstackProviderException('foo')
+    description.with {
+      name = 'name'
+      id = UUID.randomUUID()
+      subnetId = UUID.randomUUID()
+      listeners = [new Listener(externalPort: 80, externalProtocol: 'HTTP', internalPort: 8080)]
+    }
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+    LoadBalancerV2 loadBalancer = Stub(LoadBalancerV2) {
+      getId() >> '123'
+      getVipPortId() >> '321'
+    }
+    ListenerV2 listenerV2 = Mock(ListenerV2)
+
+    when:
+    Map result = operation.operate([])
+
+    then:
+    0 * operation.validatePeripherals(region, description.subnetId, description.networkId, description.securityGroups) >> {
+    }
+    1 * provider.getLoadBalancer(region, description.id) >> loadBalancer
+    1 * operation.buildListenerMap(region, loadBalancer) >> ['HTTP:80:8080': listenerV2]
+    1 * operation.updateListenersAndPools(region, loadBalancer.id, description.algorithm, _, description.healthMonitor) >> {
+    }
+    1 * operation.updateFloatingIp(region, description.networkId, loadBalancer.vipPortId)
+    1 * operation.updateSecurityGroups(region, loadBalancer.vipPortId, description.securityGroups)
+    0 * operation.updateServerGroup(opName, region, loadBalancer.id)
+
+    and:
+    result == [(description.region): [id: loadBalancer.id]]
+  }
+
+  def "operate - throw exception"() {
+    given:
+    description.with {
+      name = 'name'
+      id = UUID.randomUUID()
+      subnetId = UUID.randomUUID()
+      listeners = [new Listener(externalPort: 80, externalProtocol: 'HTTP', internalPort: 8080)]
+    }
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+    LoadBalancerV2 loadBalancer = Stub(LoadBalancerV2) {
+      getId() >> '123'
+      getVipPortId() >> '321'
+    }
+    ListenerV2 listenerV2 = Mock(ListenerV2)
 
     when:
     operation.operate([])
 
     then:
-    1 * operation.updateLoadBalancer(description.region, _, _, description.healthMonitor) >> { throw throwable }
-
-    and:
-    OpenstackOperationException openstackOperationException = thrown(OpenstackOperationException)
-    openstackOperationException.cause == throwable
-    openstackOperationException.message.contains(AtomicOperations.UPSERT_LOAD_BALANCER)
-  }
-
-  def "should create load balancer pool - no floating ip and health monitor"() {
-    given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LoadBalancerPool loadBalancerPool = Mock()
-    VirtualIP virtualIP = Mock()
-    def newLoadBalancerPool = Stub(LbPool) { getId() >> UUID.randomUUID().toString() }
-    def newVip = Stub(Vip) { getId() >> UUID.randomUUID().toString() }
-    def newFloatingIp = Mock(NetFloatingIP)
-
-    when:
-    LbPool result = operation.createLoadBalancer(description.region, description.subnetId, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.validateSubnetId(description.region, description.subnetId) >> true
-    1 * provider.createLoadBalancerPool(description.region, loadBalancerPool) >> newLoadBalancerPool
-    1 * provider.createVip(description.region, virtualIP) >> newVip
-    0 * provider.createHealthCheckForPool(description.region, newLoadBalancerPool.id, description.healthMonitor)
-    0 * provider.associateFloatingIpToVip(description.region, description.floatingIpId, newVip.id) >> newFloatingIp
-    result == newLoadBalancerPool
-    noExceptionThrown()
-  }
-
-  def "should create load balancer and floating IP address - no health monitor"() {
-    given:
-    description.region = 'west'
-    description.subnetId = UUID.randomUUID().toString()
-    description.floatingIpId = UUID.randomUUID().toString()
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LoadBalancerPool loadBalancerPool = Mock()
-    VirtualIP virtualIP = Mock()
-    def newLoadBalancerPool = Stub(LbPool) { getId() >> UUID.randomUUID().toString() }
-    def newVip = Stub(Vip) { getId() >> UUID.randomUUID().toString() }
-
-    when:
-    LbPool result = operation.createLoadBalancer(description.region, description.subnetId, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.validateSubnetId(description.region, description.subnetId) >> true
-    1 * provider.createLoadBalancerPool(description.region, loadBalancerPool) >> newLoadBalancerPool
-    1 * provider.createVip(description.region, virtualIP) >> newVip
-    0 * provider.createHealthCheckForPool(description.region, newLoadBalancerPool.id, description.healthMonitor)
-    1 * provider.associateFloatingIpToVip(description.region, description.floatingIpId, newVip.id) >> Mock(NetFloatingIP)
-    result == newLoadBalancerPool
-    noExceptionThrown()
-  }
-
-  def "should create load balancer, floating IP address and health monitor"() {
-    given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    description.floatingIpId = UUID.randomUUID().toString()
-    description.healthMonitor = Mock(PoolHealthMonitor)
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LoadBalancerPool loadBalancerPool = Mock()
-    VirtualIP virtualIP = Mock()
-    def newLoadBalancerPool = Stub(LbPool) { getId() >> UUID.randomUUID().toString() }
-    def newVip = Stub(Vip) { getId() >> UUID.randomUUID().toString() }
-
-    when:
-    LbPool result = operation.createLoadBalancer(description.region, description.subnetId, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.validateSubnetId(description.region, description.subnetId) >> true
-    1 * provider.createLoadBalancerPool(description.region, loadBalancerPool) >> newLoadBalancerPool
-    1 * provider.createVip(description.region, virtualIP) >> newVip
-    1 * provider.createHealthCheckForPool(description.region, newLoadBalancerPool.id, description.healthMonitor)
-    1 * provider.associateFloatingIpToVip(description.region, description.floatingIpId, newVip.id) >> Mock(NetFloatingIP)
-    result == newLoadBalancerPool
-    noExceptionThrown()
-  }
-
-  def "should create load balancer, floating IP address and health monitor - exception"() {
-    given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    description.floatingIpId = UUID.randomUUID().toString()
-    description.healthMonitor = Mock(PoolHealthMonitor)
-    LoadBalancerPool loadBalancerPool = Mock()
-    VirtualIP virtualIP = Mock()
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    def newLoadBalancerPool = Stub(LbPool) { getId() >> UUID.randomUUID().toString() }
-    def newVip = Stub(Vip) { getId() >> UUID.randomUUID().toString() }
-    Throwable throwable = new OpenstackProviderException('foo')
-
-    when:
-    operation.createLoadBalancer(description.region, description.subnetId, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.validateSubnetId(description.region, description.subnetId) >> true
-    1 * provider.createLoadBalancerPool(description.region, loadBalancerPool) >> newLoadBalancerPool
-    1 * provider.createVip(description.region, virtualIP) >> newVip
-    1 * provider.createHealthCheckForPool(description.region, newLoadBalancerPool.id, description.healthMonitor)
-    1 * provider.associateFloatingIpToVip(description.region, description.floatingIpId, newVip.id) >> {
-      throw throwable
+    1 * provider.getLoadBalancer(region, description.id) >> loadBalancer
+    1 * operation.buildListenerMap(region, loadBalancer) >> ['HTTP:80:8080': listenerV2]
+    1 * operation.updateListenersAndPools(region, loadBalancer.id, description.algorithm, _, description.healthMonitor) >> {
+      throw openstackProviderException
     }
 
     and:
-    OpenstackProviderException openstackProviderException = thrown(OpenstackProviderException)
-    openstackProviderException == throwable
+    OpenstackOperationException exception = thrown(OpenstackOperationException)
+    exception.cause == openstackProviderException
   }
 
-  def "should create load balancer - invalid subnet id"() {
+  def "create load balancer"() {
     given:
-    description.region = 'west'
-    description.subnetId = 'subnetId'
-    LoadBalancerPool loadBalancerPool = Mock()
-    VirtualIP virtualIP = Mock()
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-
-    when:
-    operation.createLoadBalancer(description.region, description.subnetId, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.validateSubnetId(description.region, description.subnetId) >> false
-    OpenstackOperationException ex = thrown(OpenstackOperationException)
-    [AtomicOperations.UPSERT_LOAD_BALANCER, description.region, description.subnetId].every {
-      ex.message.contains(it)
-    }
-  }
-
-  def "should update load balancer pool and vip"() {
-    given:
-    description.id = UUID.randomUUID().toString()
-    description.region = 'west'
-    description.name = 'test'
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LoadBalancerPool loadBalancerPool = Mock()
-    VirtualIP virtualIP = Mock()
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-
-    when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    result == lbPool
-    noExceptionThrown()
-  }
-
-  def "should update load balancer pool, vip, add health monitor"() {
-    given:
-    VirtualIP virtualIP = Mock()
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    PoolHealthMonitor poolHealthMonitor = Mock()
-
-    and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-    description.healthMonitor = poolHealthMonitor
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-
-    when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    1 * lbPool.healthMonitors >> []
-    1 * provider.createHealthCheckForPool(description.region, lbPool.id, poolHealthMonitor)
-    result == lbPool
-    noExceptionThrown()
-  }
-
-  def "should update load balancer pool, vip, update health monitor"() {
-    given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    VirtualIP virtualIP = Mock()
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    PoolHealthMonitor poolHealthMonitor = Mock()
-    def existingMonitor = Stub(HealthMonitor) {
-      getType() >> HealthMonitorType.PING
+    String name = 'name'
+    String subnetId = UUID.randomUUID()
+    LoadBalancerV2 loadBalancer = Mock(LoadBalancerV2) {
+      getId() >> '123'
+      getProvisioningStatus() >> LbProvisioningStatus.ACTIVE
     }
 
     and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-    description.healthMonitor = poolHealthMonitor
-    String existingHealthMonitorId = UUID.randomUUID().toString()
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
 
     when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
+    LoadBalancerV2 result = operation.createLoadBalancer(region, name, subnetId)
 
     then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    2 * lbPool.healthMonitors >> [existingHealthMonitorId]
-    1 * provider.getHealthMonitor(description.region, existingHealthMonitorId) >> existingMonitor
-    1 * poolHealthMonitor.type >> PoolHealthMonitorType.PING
-    1 * provider.updateHealthMonitor(description.region, poolHealthMonitor)
-    result == lbPool
-    noExceptionThrown()
+    1 * operation.createBlockingActiveStatusChecker(region) >> blockingClientAdapter
+    1 * provider.createLoadBalancer(region, name, _, subnetId) >> loadBalancer
+
+    and:
+    result == loadBalancer
   }
 
-  def "should update load balancer pool, vip, remove existing and add new health monitor"() {
+  def "create load balancer exception"() {
     given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    VirtualIP virtualIP = Mock()
-    PoolHealthMonitor poolHealthMonitor = Mock()
-    def existingMonitor = Stub(HealthMonitor) {
-      getType() >> HealthMonitorType.PING
+    String name = 'name'
+    String subnetId = UUID.randomUUID()
+    LoadBalancerV2 loadBalancer = Mock(LoadBalancerV2)
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.createLoadBalancer(region, name, subnetId)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region) >> blockingClientAdapter
+    1 * provider.createLoadBalancer(region, name, _, subnetId) >> { throw openstackProviderException }
+
+    and:
+    thrown(OpenstackProviderException)
+  }
+
+  def "no update security groups - #testCase"() {
+    given:
+    String id = UUID.randomUUID()
+    Port port = Mock(Port)
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    operation.updateSecurityGroups(region, id, [securityGroup])
+
+    then:
+    1 * provider.getPort(region, id) >> port
+    1 * port.getSecurityGroups() >> [securityGroup]
+
+    where:
+    testCase | groups | securityGroup
+    'empty'  | [] | '123'
+    'equal'  | ['123'] | '123'
+  }
+
+  def "update security groups"() {
+    given:
+    String id = UUID.randomUUID()
+    String securityGroup = UUID.randomUUID()
+    Port port = Mock(Port)
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    operation.updateSecurityGroups(region, id, [securityGroup])
+
+    then:
+    1 * provider.getPort(region, id) >> port
+    1 * port.getSecurityGroups() >> []
+    1 * provider.updatePort(region, id, [securityGroup])
+  }
+
+  def "update floating ip - create new floating ip"() {
+    given:
+    String networkId = UUID.randomUUID()
+    String portId = UUID.randomUUID()
+    NetFloatingIP netFloatingIP = null
+    Network network = Mock(Network)
+    FloatingIP floatingIp = Mock(FloatingIP)
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    operation.updateFloatingIp(region, networkId, portId)
+
+    then:
+    1 * provider.getFloatingIpForPort(region, portId) >> netFloatingIP
+    1 * provider.getNetwork(region, networkId) >> network
+    1 * provider.getOrCreateFloatingIp(region, network.name) >> floatingIp
+    1 * provider.associateFloatingIpToPort(region, floatingIp.id, portId)
+  }
+
+  def "update floating ip - remove floating ip"() {
+    given:
+    String networkId = null
+    String portId = UUID.randomUUID()
+    NetFloatingIP netFloatingIP = Mock(NetFloatingIP)
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    operation.updateFloatingIp(region, networkId, portId)
+
+    then:
+    1 * provider.getFloatingIpForPort(region, portId) >> netFloatingIP
+    1 * provider.disassociateFloatingIpFromPort(region, netFloatingIP.id)
+  }
+
+  def "update floating ip - already exists"() {
+    given:
+    String networkId = UUID.randomUUID()
+    String portId = UUID.randomUUID()
+    NetFloatingIP netFloatingIP = Mock(NetFloatingIP)
+    Network network = Mock(Network)
+    FloatingIP floatingIp = Mock(FloatingIP)
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    operation.updateFloatingIp(region, networkId, portId)
+
+    then:
+    1 * provider.getFloatingIpForPort(region, portId) >> netFloatingIP
+    1 * provider.getNetwork(region, networkId) >> network
+    1 * provider.getOrCreateFloatingIp(region, network.name) >> floatingIp
+  }
+
+  def "update floating ip - network changed"() {
+    given:
+    String networkId = UUID.randomUUID()
+    String portId = UUID.randomUUID()
+    NetFloatingIP netFloatingIP = Mock(NetFloatingIP) {
+      getFloatingNetworkId() >> { UUID.randomUUID() }
     }
+    Network network = Mock(Network)
+    FloatingIP floatingIp = Mock(FloatingIP)
 
     and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-    description.healthMonitor = poolHealthMonitor
-    String existingHealthMonitorId = UUID.randomUUID().toString()
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
 
     when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
+    operation.updateFloatingIp(region, networkId, portId)
 
     then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, _)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, _)
-    2 * lbPool.healthMonitors >> [existingHealthMonitorId]
-    1 * provider.getHealthMonitor(description.region, existingHealthMonitorId) >> existingMonitor
-    1 * poolHealthMonitor.type >> PoolHealthMonitorType.HTTP
-    1 * provider.disassociateAndRemoveHealthMonitor(description.region, lbPool.id, existingHealthMonitorId)
-    1 * provider.createHealthCheckForPool(description.region, lbPool.id, poolHealthMonitor)
-    result == lbPool
+    1 * provider.getFloatingIpForPort(region, portId) >> netFloatingIP
+    1 * provider.getNetwork(region, networkId) >> network
+    1 * provider.getOrCreateFloatingIp(region, network.name) >> floatingIp
+    1 * provider.disassociateFloatingIpFromPort(region, netFloatingIP.id)
+    1 * provider.associateFloatingIpToPort(region, floatingIp.id, portId)
+  }
+
+  def "add listeners and pools"() {
+    given:
+    String name = 'name'
+    Algorithm algorithm = Algorithm.ROUND_ROBIN
+    String loadBalancerId = UUID.randomUUID()
+    String key = 'HTTP:80:8080'
+
+    and:
+    Listener listener = new Listener(externalProtocol: 'HTTP', externalPort: 80, internalPort: 8080)
+    ListenerV2 newListener = Mock(ListenerV2)
+    LbPoolV2 newLbPool = Mock(LbPoolV2)
+    HealthMonitor healthMonitor = Mock(HealthMonitor)
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.addListenersAndPools(region, loadBalancerId, name, algorithm, [(key): listener], healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    1 * provider.createListener(region, name, listener.externalProtocol.name(), listener.externalPort, key, loadBalancerId) >> newListener
+    //todo: is this right? just doing listener.externalProtocol.name()
+    1 * provider.createPool(region, name, listener.externalProtocol.name(), algorithm.name(), newListener.id) >> newLbPool
+    1 * operation.updateHealthMonitor(region, loadBalancerId, newLbPool, healthMonitor) >> {}
+  }
+
+  def "update listeners and pools - change algorithm"() {
+    given:
+    Algorithm algorithm = Algorithm.ROUND_ROBIN
+    String loadBalancerId = UUID.randomUUID()
+    ListenerV2 listener = Mock(ListenerV2) {
+      getId() >> '123'
+    }
+    HealthMonitor healthMonitor = Mock(HealthMonitor)
+    String poolId = UUID.randomUUID()
+    LbPoolV2 lbPool = Mock(LbPoolV2)
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.updateListenersAndPools(region, loadBalancerId, algorithm, [listener], healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    _ * listener.defaultPoolId >> poolId
+    1 * provider.getPool(region, poolId) >> lbPool
+    _ * lbPool.lbMethod >> LbMethod.LEAST_CONNECTIONS
+    1 * provider.updatePool(region, lbPool.id, algorithm.name()) >> lbPool
+    1 * operation.updateHealthMonitor(region, loadBalancerId, lbPool, healthMonitor) >> {}
+  }
+
+  def "update listeners and pools - no updates"() {
+    given:
+    Algorithm algorithm = Algorithm.ROUND_ROBIN
+    String loadBalancerId = UUID.randomUUID()
+    ListenerV2 listener = Mock(ListenerV2) {
+      getId() >> '123'
+    }
+    HealthMonitor healthMonitor = Mock(HealthMonitor)
+    String poolId = UUID.randomUUID()
+    LbPoolV2 lbPool = Mock(LbPoolV2)
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.updateListenersAndPools(region, loadBalancerId, algorithm, [listener], healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    _ * listener.defaultPoolId >> poolId
+    1 * provider.getPool(region, poolId) >> lbPool
+    _ * lbPool.lbMethod >> LbMethod.ROUND_ROBIN
+    0 * provider.updatePool(region, lbPool.id, algorithm.name()) >> lbPool
+    1 * operation.updateHealthMonitor(region, loadBalancerId, lbPool, healthMonitor) >> {}
+  }
+
+  def "update health monitor"() {
+    given:
+    String loadBalancerId = UUID.randomUUID()
+    LbPoolV2 lbPool = Mock(LbPoolV2)
+    HealthMonitor healthMonitor = Mock(HealthMonitor)
+    String healthMonitorId = UUID.randomUUID()
+    HealthMonitorV2 healthMonitorV2 = Mock(HealthMonitorV2)
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.updateHealthMonitor(region, loadBalancerId, lbPool, healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    _ * lbPool.healthMonitorId >> healthMonitorId
+    1 * provider.getMonitor(region, healthMonitorId) >> healthMonitorV2
+    1 * healthMonitorV2.type >> HealthMonitorType.PING
+    1 * healthMonitor.type >> HealthMonitor.HealthMonitorType.PING
+    1 * provider.updateMonitor(region, healthMonitorId, healthMonitor)
+  }
+
+  def "update health monitor - delete/add"() {
+    given:
+    String loadBalancerId = UUID.randomUUID()
+    LbPoolV2 lbPool = Mock(LbPoolV2)
+    HealthMonitor healthMonitor = Mock(HealthMonitor)
+    String healthMonitorId = UUID.randomUUID()
+    HealthMonitorV2 healthMonitorV2 = Mock(HealthMonitorV2)
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.updateHealthMonitor(region, loadBalancerId, lbPool, healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    _ * lbPool.healthMonitorId >> healthMonitorId
+    1 * provider.getMonitor(region, healthMonitorId) >> healthMonitorV2
+    1 * healthMonitorV2.type >> HealthMonitorType.PING
+    1 * healthMonitor.type >> HealthMonitor.HealthMonitorType.TCP
+    1 * provider.deleteMonitor(region, healthMonitorId)
+    1 * provider.createMonitor(region, lbPool.id, healthMonitor)
+  }
+
+  def "update health monitor - no monitor"() {
+    given:
+    String loadBalancerId = UUID.randomUUID()
+    LbPoolV2 lbPool = Mock(LbPoolV2)
+    HealthMonitor healthMonitor = null
+    String healthMonitorId = UUID.randomUUID()
+
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.updateHealthMonitor(region, loadBalancerId, lbPool, healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    _ * lbPool.healthMonitorId >> healthMonitorId
+    1 * operation.removeHealthMonitor(opName, region, loadBalancerId, healthMonitorId) >> {}
+  }
+
+  def "update health monitor - add monitor no existing"() {
+    given:
+    String loadBalancerId = UUID.randomUUID()
+    LbPoolV2 lbPool = Mock(LbPoolV2)
+    HealthMonitor healthMonitor = Mock(HealthMonitor)
+    String healthMonitorId = null
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.updateHealthMonitor(region, loadBalancerId, lbPool, healthMonitor)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    _ * lbPool.healthMonitorId >> healthMonitorId
+    1 * provider.createMonitor(region, lbPool.id, healthMonitor)
+  }
+
+  def "remove health monitor"() {
+    given:
+    String id = UUID.randomUUID()
+    String loadBalancerId = UUID.randomUUID()
+
+    and:
+    def operation = Spy(UpsertOpenstackLoadBalancerAtomicOperation, constructorArgs: [description])
+
+    when:
+    operation.removeHealthMonitor(opName, region, loadBalancerId, id)
+
+    then:
+    1 * operation.createBlockingActiveStatusChecker(region, loadBalancerId) >> blockingClientAdapter
+    1 * provider.deleteMonitor(region, id)
+  }
+
+  def "create blocking status checker"() {
+    given:
+    String loadBalancerId = UUID.randomUUID()
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    BlockingStatusChecker result = operation.createBlockingActiveStatusChecker(region, loadBalancerId)
+
+    then:
+    result.statusChecker != null
+  }
+
+  def "build listener map"() {
+    given:
+    LoadBalancerV2 loadBalancer = Mock(LoadBalancerV2)
+    ListItem listItem = Mock(ListItem)
+    String listenerId = UUID.randomUUID()
+    ListenerV2 listener = Mock(ListenerV2)
+    String desc = 'test'
+
+    and:
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    Map<String, ListenerV2> result = operation.buildListenerMap(region, loadBalancer)
+
+    then:
+    1 * loadBalancer.listeners >> [listItem]
+    1 * listItem.id >> listenerId
+    1 * provider.getListener(region, listenerId) >> listener
+    1 * listener.description >> desc
+
+    and:
+    result == [(desc): listener]
+  }
+
+  def "validatePeripherals success"() {
+    given:
+    String subnetId = UUID.randomUUID()
+    String networkId = UUID.randomUUID()
+    String securityGroup = UUID.randomUUID()
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
+
+    when:
+    operation.validatePeripherals(region, subnetId, networkId, [securityGroup])
+
+    then:
+    1 * provider.getSubnet(region, subnetId) >> Mock(Subnet)
+    1 * provider.getNetwork(region, networkId) >> Mock(Network)
+    1 * provider.getSecurityGroup(region, securityGroup)
     noExceptionThrown()
   }
 
-  def "should update load balancer pool, vip, remove existing"() {
+  def "validatePeripherals subnet"() {
     given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    VirtualIP virtualIP = Mock()
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-
-    and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-    String existingHealthMonitorId = UUID.randomUUID().toString()
+    String subnetId = UUID.randomUUID()
+    String networkId = UUID.randomUUID()
+    String securityGroup = UUID.randomUUID()
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
 
     when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
+    operation.validatePeripherals(region, subnetId, networkId, [securityGroup])
 
     then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    2 * lbPool.healthMonitors >> [existingHealthMonitorId]
-    1 * provider.disassociateAndRemoveHealthMonitor(description.region, lbPool.id, existingHealthMonitorId)
-    1 * provider.getAssociatedFloatingIp(description.region, vip.id)
-    result == lbPool
-    noExceptionThrown()
+    1 * provider.getSubnet(region, subnetId) >> null
+    0 * provider.getNetwork(region, networkId) >> Mock(Network)
+    0 * provider.getSecurityGroup(region, securityGroup)
+
+    and:
+    thrown(OpenstackResourceNotFoundException)
   }
 
-  def "should update load balancer pool and vip - add floating ip"() {
+  def "validatePeripherals network"() {
     given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    VirtualIP virtualIP = Mock()
-
-    and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-    description.floatingIpId = 'floatingIpId'
+    String subnetId = UUID.randomUUID()
+    String networkId = UUID.randomUUID()
+    String securityGroup = UUID.randomUUID()
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
 
     when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
+    operation.validatePeripherals(region, subnetId, networkId, [securityGroup])
 
     then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    1 * lbPool.healthMonitors >> []
-    1 * provider.getAssociatedFloatingIp(description.region, vip.id) >> null
-    1 * provider.associateFloatingIpToVip(description.region, description.floatingIpId, vip.id)
-    result == lbPool
-    noExceptionThrown()
+    1 * provider.getSubnet(region, subnetId) >> Mock(Subnet)
+    1 * provider.getNetwork(region, networkId) >> null
+    0 * provider.getSecurityGroup(region, securityGroup)
+
+    and:
+    thrown(OpenstackResourceNotFoundException)
   }
 
-  def "should update load balancer pool and vip - remove and add floating ip"() {
+  def "validatePeripherals security groups"() {
     given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    FloatingIP floatingIP = Mock()
-    VirtualIP virtualIP = Mock()
-
-    and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-    description.floatingIpId = 'floatingIpId'
+    String subnetId = UUID.randomUUID()
+    String networkId = UUID.randomUUID()
+    String securityGroup = UUID.randomUUID()
+    def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
 
     when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
+    operation.validatePeripherals(region, subnetId, networkId, [securityGroup])
 
     then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    3 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    1 * lbPool.healthMonitors >> []
-    1 * provider.getAssociatedFloatingIp(description.region, vip.id) >> floatingIP
-    5 * floatingIP.id >> UUID.randomUUID().toString()
-    1 * provider.disassociateFloatingIp(description.region, floatingIP.id)
-    1 * provider.associateFloatingIpToVip(description.region, description.floatingIpId, vip.id)
-    result == lbPool
-    noExceptionThrown()
-  }
-
-  def "should update load balancer pool and vip - remove floating ip"() {
-    given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    FloatingIP floatingIP = Mock()
-    VirtualIP virtualIP = Mock()
+    1 * provider.getSubnet(region, subnetId) >> Mock(Subnet)
+    1 * provider.getNetwork(region, networkId) >> Mock(Network)
+    1 * provider.getSecurityGroup(region, securityGroup) >> { throw new OpenstackResourceNotFoundException('test') }
 
     and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'test')
-    description.region = 'west'
-
-    when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    3 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    1 * lbPool.healthMonitors >> []
-    1 * provider.getAssociatedFloatingIp(description.region, vip.id) >> floatingIP
-    1 * provider.disassociateFloatingIp(description.region, floatingIP.id)
-    result == lbPool
-    noExceptionThrown()
-  }
-
-  def "should do no updates"() {
-    given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    VirtualIP virtualIP = Mock()
-    LoadBalancerPool loadBalancerPool = Mock()
-    description.region = 'west'
-
-    when:
-    LbPool result = operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * loadBalancerPool.equals(lbPool) >> true
-    0 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * virtualIP.doesNameMatch(vip.name) >> true
-    0 * provider.updateVip(description.region, virtualIP)
-    1 * lbPool.healthMonitors >> []
-    1 * provider.getAssociatedFloatingIp(description.region, vip.id) >> null
-    result == lbPool
-    noExceptionThrown()
-  }
-
-  def "should update load balancer pool - not found"() {
-    given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    Throwable throwable = new OpenstackProviderException('foo')
-
-    and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'name')
-    description.region = 'west'
-
-    when:
-    operation.updateLoadBalancer(description.region, loadBalancerPool, Mock(VirtualIP), description.healthMonitor)
-
-    then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> { throw throwable }
-
-    and:
-    OpenstackProviderException openstackProviderException = thrown(OpenstackProviderException)
-    openstackProviderException == throwable
-  }
-
-  def "should update load balancer pool, vip, add health monitor - exception"() {
-    given:
-    @Subject def operation = new UpsertOpenstackLoadBalancerAtomicOperation(description)
-    LbPool lbPool = Mock()
-    Vip vip = Mock()
-    VirtualIP virtualIP = Mock()
-    PoolHealthMonitor poolHealthMonitor = Mock()
-    Throwable throwable = new OpenstackProviderException('foo')
-
-    and:
-    LoadBalancerPool loadBalancerPool = new LoadBalancerPool(id: UUID.randomUUID().toString(), name: 'name')
-    description.region = 'west'
-    description.healthMonitor = poolHealthMonitor
-
-    when:
-    operation.updateLoadBalancer(description.region, loadBalancerPool, virtualIP, description.healthMonitor)
-
-    then:
-    1 * provider.getLoadBalancerPool(description.region, loadBalancerPool.id) >> lbPool
-    1 * provider.updateLoadBalancerPool(description.region, loadBalancerPool)
-    1 * provider.getVip(description.region, lbPool.vipId) >> vip
-    1 * vip.name >> 'newVip'
-    1 * provider.updateVip(description.region, virtualIP)
-    1 * lbPool.healthMonitors >> []
-    1 * provider.createHealthCheckForPool(description.region, lbPool.id, poolHealthMonitor) >> { throw throwable }
-
-    and:
-    OpenstackProviderException openstackProviderException = thrown(OpenstackProviderException)
-    openstackProviderException == throwable
+    thrown(OpenstackResourceNotFoundException)
   }
 }

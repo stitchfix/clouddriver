@@ -16,6 +16,7 @@
 
 package com.netflix.spinnaker.clouddriver.google.deploy
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.google.api.client.googleapis.batch.BatchRequest
 import com.google.api.client.googleapis.batch.json.JsonBatchCallback
 import com.google.api.client.googleapis.json.GoogleJsonError
@@ -29,40 +30,34 @@ import com.netflix.spinnaker.clouddriver.data.task.Task
 import com.netflix.spinnaker.clouddriver.google.GoogleConfiguration
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BaseGoogleInstanceDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.BasicGoogleDeployDescription
-import com.netflix.spinnaker.clouddriver.google.deploy.description.CreateGoogleHttpLoadBalancerDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.UpsertGoogleLoadBalancerDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.description.UpsertGoogleSecurityGroupDescription
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleOperationException
 import com.netflix.spinnaker.clouddriver.google.deploy.exception.GoogleResourceNotFoundException
-import com.netflix.spinnaker.clouddriver.google.model.GoogleDisk
-import com.netflix.spinnaker.clouddriver.google.model.GoogleDiskType
-import com.netflix.spinnaker.clouddriver.google.model.GoogleSecurityGroup
-import com.netflix.spinnaker.clouddriver.google.model.GoogleServerGroup
+import com.netflix.spinnaker.clouddriver.google.model.*
+import com.netflix.spinnaker.clouddriver.google.model.callbacks.Utils
+import com.netflix.spinnaker.clouddriver.google.model.loadbalancing.*
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleClusterProvider
+import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleLoadBalancerProvider
 import com.netflix.spinnaker.clouddriver.google.provider.view.GoogleSecurityGroupProvider
 import com.netflix.spinnaker.clouddriver.google.security.GoogleNamedAccountCredentials
+import groovy.util.logging.Slf4j
 
+@Slf4j
 class GCEUtil {
   private static final String DISK_TYPE_PERSISTENT = "PERSISTENT"
   private static final String DISK_TYPE_SCRATCH = "SCRATCH"
+  private static final String GCE_API_PREFIX = "https://www.googleapis.com/compute/v1/projects/"
 
   public static final String TARGET_POOL_NAME_PREFIX = "tp"
 
-  static MachineType queryMachineType(String projectName, String machineTypeName, Compute compute, Task task, String phase) {
-    task.updateStatus phase, "Looking up machine type $machineTypeName..."
+  static String queryMachineType(String instanceType, String location, GoogleNamedAccountCredentials credentials, Task task, String phase) {
+    task.updateStatus phase, "Looking up machine type $instanceType..."
 
-    Map<String, MachineTypesScopedList> zoneToMachineTypesMap = compute.machineTypes().aggregatedList(projectName).execute().items
-
-    def machineType = zoneToMachineTypesMap.collect { _, machineTypesScopedList ->
-      machineTypesScopedList.machineTypes
-    }.flatten().find { machineType ->
-      machineType.name == machineTypeName
-    }
-
-    if (machineType) {
-      return machineType
+    if (instanceType in credentials.locationToInstanceTypesMap[location]?.instanceTypes) {
+      return instanceType
     } else {
-      updateStatusAndThrowNotFoundException("Machine type $machineTypeName not found.", task, phase)
+      updateStatusAndThrowNotFoundException("Machine type $instanceType not found.", task, phase)
     }
   }
 
@@ -170,6 +165,19 @@ class GCEUtil {
     }
   }
 
+  static BackendService queryBackendService(Compute compute, String project, String serviceName, Task task, String phase) {
+    task.updateStatus phase, "Checking for existing backend service $serviceName..."
+
+    try {
+      return compute.backendServices().get(project, serviceName).execute()
+    } catch (GoogleJsonResponseException e) {
+      if (e.getStatusCode() != 404) {
+        throw e
+      }
+      return null
+    }
+  }
+
   static TargetPool queryTargetPool(
     String projectName, String region, String targetPoolName, Compute compute, Task task, String phase) {
     task.updateStatus phase, "Checking for existing network load balancer (target pool) $targetPoolName..."
@@ -179,12 +187,37 @@ class GCEUtil {
     }
   }
 
+  // TODO(duftler): Update this to query for the exact health check instead of searching all.
   static HttpHealthCheck queryHttpHealthCheck(
     String projectName, String httpHealthCheckName, Compute compute, Task task, String phase) {
     task.updateStatus phase, "Checking for existing network load balancer (http health check) $httpHealthCheckName..."
 
     return compute.httpHealthChecks().list(projectName).execute().items.find { existingHealthCheck ->
       existingHealthCheck.name == httpHealthCheckName
+    }
+  }
+
+  static def queryHealthCheck(String projectName, String healthCheckName, Compute compute, Task task, String phase) {
+    task.updateStatus phase, "Looking up http(s) health check $healthCheckName..."
+
+    try {
+      return compute.httpHealthChecks().get(projectName, healthCheckName).execute()
+    } catch (GoogleJsonResponseException e) {
+      // 404 is thrown, and the details are populated, if the health check does not exist in the given project.
+      // Any other exception should be propagated directly.
+      if (e.getStatusCode() == 404 && e.details) {
+        try {
+          return compute.httpsHealthChecks().get(projectName, healthCheckName).execute()
+        } catch (GoogleJsonResponseException exc) {
+          if (exc.getStatusCode() == 404 && exc.details) {
+            updateStatusAndThrowNotFoundException("Http(s) health check $healthCheckName not found.", task, phase)
+          } else {
+            throw e
+          }
+        }
+      } else {
+        throw e
+      }
     }
   }
 
@@ -202,6 +235,21 @@ class GCEUtil {
       def foundNames = foundForwardingRules.collect { it.name }
 
       updateStatusAndThrowNotFoundException("Network load balancers ${forwardingRuleNames - foundNames} not found.", task, phase)
+    }
+  }
+
+  static List<GoogleLoadBalancerView> queryAllLoadBalancers(GoogleLoadBalancerProvider googleLoadBalancerProvider,
+                                                            List<String> forwardingRuleNames,
+                                                            Task task,
+                                                            String phase) {
+    def loadBalancers = googleLoadBalancerProvider.getApplicationLoadBalancers("") as List
+    def foundLoadBalancers = loadBalancers.findAll { it.name in forwardingRuleNames }
+
+    if (foundLoadBalancers.size == forwardingRuleNames.size) {
+      return foundLoadBalancers
+    } else {
+      def foundNames = loadBalancers.collect { it.name }
+      updateStatusAndThrowNotFoundException("Load balancers ${forwardingRuleNames - foundNames} not found.", task, phase)
     }
   }
 
@@ -261,12 +309,9 @@ class GCEUtil {
                                                                     String region,
                                                                     GoogleNamedAccountCredentials credentials) {
     def compute = credentials.compute
-    def zones = getZonesFromRegion(projectName, region, compute)
-
-    def allMIGSInRegion = zones.findResults {
-      def localZoneName = getLocalName(it)
-
-      compute.instanceGroupManagers().list(projectName, localZoneName).execute().getItems()
+    def zones = credentials.getZonesFromRegion(region)
+    def allMIGSInRegion = zones.findResults { zone ->
+      compute.instanceGroupManagers().list(projectName, zone).execute().getItems()
     }.flatten()
 
     return allMIGSInRegion
@@ -328,15 +373,42 @@ class GCEUtil {
     return ((tags ?: []) + securityGroupTags).unique()
   }
 
-  static String getRegionFromZone(String projectName, String zone, Compute compute) {
-    // Zone.getRegion() returns a full URL reference.
-    def fullRegion = compute.zones().get(projectName, zone).execute().getRegion()
-    // Even if getRegion() is changed to return just the unqualified region name, this will still work.
-    getLocalName(fullRegion)
-  }
+  static boolean shouldUpdateUrlMap(UrlMap urlMap, UpsertGoogleLoadBalancerDescription description) {
+    if (!urlMap) {
+      return false
+    }
+    if (getLocalName(urlMap.getDefaultService()) != description.defaultService.name) {
+      return true
+    }
 
-  static List<String> getZonesFromRegion(String projectName, String region, Compute compute) {
-    return compute.regions().get(projectName, region).execute().getZones()
+    Map<List<String>, Map> existingHostRuleMap = [:] // Nested: [sorted host pattern list -> [sorted url pattern list -> local backend service name]]
+
+    urlMap?.getHostRules()?.each { HostRule hostRule ->
+      urlMap?.getPathMatchers()?.each { PathMatcher pathMatcher ->
+        if (pathMatcher.getName() == hostRule.getPathMatcher()) {
+          Map pathRuleMap = [:]
+          List<PathRule> pathRules = pathMatcher.getPathRules()
+          pathRules?.each { PathRule pathRule ->
+            pathRuleMap.put(pathRule.getPaths().sort(), getLocalName(pathRule.getService()))
+          }
+          existingHostRuleMap.put(hostRule.getHosts().sort(), pathRuleMap)
+        }
+      }
+    }
+
+    Boolean mapServicesDiffer = false
+    description?.hostRules?.each { GoogleHostRule googleHostRule ->
+      def hostPatterns = googleHostRule.hostPatterns.sort()
+      googleHostRule?.pathMatcher?.pathRules?.each { GooglePathRule googlePathRule ->
+        def urlPatterns = googlePathRule?.paths?.sort()
+        Map urlPatternMap = existingHostRuleMap.get(hostPatterns)
+        if (!urlPatternMap || !urlPatternMap.containsKey(urlPatterns) || urlPatternMap.get(urlPatterns) != getLocalName(googlePathRule.backendService.name)) {
+          mapServicesDiffer = true // Groovy, baby.
+          return
+        }
+      }
+    }
+    return mapServicesDiffer
   }
 
   static BaseGoogleInstanceDescription buildInstanceDescriptionFromTemplate(InstanceTemplate instanceTemplate) {
@@ -388,7 +460,7 @@ class GCEUtil {
     )
   }
 
-  static BasicGoogleDeployDescription.AutoscalingPolicy buildAutoscalingPolicyDescriptionFromAutoscalingPolicy(
+  static GoogleAutoscalingPolicy buildAutoscalingPolicyDescriptionFromAutoscalingPolicy(
     AutoscalingPolicy autoscalingPolicy) {
     if (!autoscalingPolicy) {
       return null
@@ -396,7 +468,7 @@ class GCEUtil {
 
     autoscalingPolicy.with {
       def autoscalingPolicyDescription =
-          new BasicGoogleDeployDescription.AutoscalingPolicy(
+          new GoogleAutoscalingPolicy(
               coolDownPeriodSec: coolDownPeriodSec,
               minNumReplicas: minNumReplicas,
               maxNumReplicas: maxNumReplicas
@@ -404,14 +476,14 @@ class GCEUtil {
 
       if (cpuUtilization) {
         autoscalingPolicyDescription.cpuUtilization =
-            new BasicGoogleDeployDescription.AutoscalingPolicy.CpuUtilization(
+            new GoogleAutoscalingPolicy.CpuUtilization(
                 utilizationTarget: cpuUtilization.utilizationTarget
             )
       }
 
       if (loadBalancingUtilization) {
         autoscalingPolicyDescription.loadBalancingUtilization =
-            new BasicGoogleDeployDescription.AutoscalingPolicy.LoadBalancingUtilization(
+            new GoogleAutoscalingPolicy.LoadBalancingUtilization(
                 utilizationTarget: loadBalancingUtilization.utilizationTarget
             )
       }
@@ -419,7 +491,7 @@ class GCEUtil {
       if (customMetricUtilizations) {
         autoscalingPolicyDescription.customMetricUtilizations =
             customMetricUtilizations.collect {
-              new BasicGoogleDeployDescription.AutoscalingPolicy.CustomMetricUtilization(
+              new GoogleAutoscalingPolicy.CustomMetricUtilization(
                   metric: it.metric,
                   utilizationTarget: it.utilizationTarget,
                   utilizationTargetType: it.utilizationTargetType
@@ -431,12 +503,44 @@ class GCEUtil {
     }
   }
 
+  static BasicGoogleDeployDescription.AutoHealingPolicy buildAutoHealingPolicyDescriptionFromAutoHealingPolicy(
+    InstanceGroupManagerAutoHealingPolicy autoHealingPolicy) {
+    if (!autoHealingPolicy) {
+      return null
+    }
+
+    return new BasicGoogleDeployDescription.AutoHealingPolicy(
+      healthCheck: Utils.getLocalName(autoHealingPolicy.healthCheck),
+      initialDelaySec: autoHealingPolicy.initialDelaySec
+    )
+  }
+
   static List<String> retrieveScopesFromServiceAccount(String serviceAccountEmail, List<ServiceAccount> serviceAccounts) {
     return serviceAccountEmail ? serviceAccounts?.find { it.email == serviceAccountEmail }?.scopes : null
   }
 
   static String buildDiskTypeUrl(String projectName, String zone, GoogleDiskType diskType) {
-    return "https://www.googleapis.com/compute/v1/projects/$projectName/zones/$zone/diskTypes/$diskType"
+    return GCE_API_PREFIX + "$projectName/zones/$zone/diskTypes/$diskType"
+  }
+
+  static String buildZonalServerGroupUrl(String projectName, String zone, String serverGroupName) {
+    return GCE_API_PREFIX + "$projectName/zones/$zone/instanceGroups/$serverGroupName"
+  }
+
+  static String buildCertificateUrl(String projectName, String certName) {
+    return GCE_API_PREFIX + "$projectName/global/sslCertificates/$certName"
+  }
+
+  static String buildHttpHealthCheckUrl(String projectName, String healthCheckName) {
+    return GCE_API_PREFIX + "$projectName/global/httpHealthChecks/$healthCheckName"
+  }
+
+  static String buildBackendServiceUrl(String projectName, String backendServiceName) {
+    return GCE_API_PREFIX + "$projectName/global/backendServices/$backendServiceName"
+  }
+
+  static String buildRegionalServerGroupUrl(String projectName, String region, String serverGroupName) {
+    return GCE_API_PREFIX + "$projectName/regions/$region/instanceGroups/$serverGroupName"
   }
 
   static List<AttachedDisk> buildAttachedDisks(String projectName,
@@ -455,6 +559,10 @@ class GCEUtil {
     }
 
     def firstPersistentDisk = disks.find { it.persistent }
+
+    if (firstPersistentDisk && sourceImage.diskSizeGb > firstPersistentDisk.sizeGb) {
+      firstPersistentDisk.sizeGb = sourceImage.diskSizeGb
+    }
 
     return disks.collect { disk ->
       def diskType = useDiskTypeUrl ? buildDiskTypeUrl(projectName, zone, disk.type) : disk.type
@@ -507,9 +615,9 @@ class GCEUtil {
 
 
   static Autoscaler buildAutoscaler(String serverGroupName,
-                                    Operation migCreateOperation,
-                                    BasicGoogleDeployDescription description) {
-    description.autoscalingPolicy.with {
+                                    String targetLink,
+                                    GoogleAutoscalingPolicy autoscalingPolicy) {
+    autoscalingPolicy.with {
       def gceAutoscalingPolicy = new AutoscalingPolicy(coolDownPeriodSec: coolDownPeriodSec,
                                                        minNumReplicas: minNumReplicas,
                                                        maxNumReplicas: maxNumReplicas)
@@ -532,10 +640,9 @@ class GCEUtil {
         }
       }
 
-      return new Autoscaler(name: serverGroupName,
-                            zone: migCreateOperation.zone,
-                            target: migCreateOperation.targetLink,
-                            autoscalingPolicy: gceAutoscalingPolicy)
+      new Autoscaler(name: serverGroupName,
+                     target: targetLink,
+                     autoscalingPolicy: gceAutoscalingPolicy)
     }
   }
 
@@ -580,7 +687,7 @@ class GCEUtil {
     return scheduling
   }
 
-  private static void updateStatusAndThrowNotFoundException(String errorMsg, Task task, String phase) {
+  static void updateStatusAndThrowNotFoundException(String errorMsg, Task task, String phase) {
     task.updateStatus phase, errorMsg
     throw new GoogleResourceNotFoundException(errorMsg)
   }
@@ -606,23 +713,178 @@ class GCEUtil {
         requestPath: healthCheckDescription.requestPath)
   }
 
-  // I know this is painfully similar to the method above. I will soon make a cleanup change to remove this ugliness.
-  // TODO(bklingher): Clean this up.
-  static def makeHttpHealthCheck(String name, CreateGoogleHttpLoadBalancerDescription.HealthCheck healthCheckDescription) {
-    if (healthCheckDescription) {
-      return new HttpHealthCheck(
-          name: name,
-          checkIntervalSec: healthCheckDescription.checkIntervalSec,
-          timeoutSec: healthCheckDescription.timeoutSec,
-          healthyThreshold: healthCheckDescription.healthyThreshold,
-          unhealthyThreshold: healthCheckDescription.unhealthyThreshold,
-          port: healthCheckDescription.port,
-          requestPath: healthCheckDescription.requestPath)
-    } else {
-      return new HttpHealthCheck(
-          name: name
-      )
+  static void addHttpLoadBalancerBackends(Compute compute,
+                                          ObjectMapper objectMapper,
+                                          String project,
+                                          GoogleServerGroup.View serverGroup,
+                                          GoogleLoadBalancerProvider googleLoadBalancerProvider,
+                                          Task task,
+                                          String phase) {
+    String serverGroupName = serverGroup.name
+    Metadata instanceMetadata = serverGroup?.launchConfig?.instanceTemplate?.properties?.metadata
+    Map metadataMap = buildMapFromMetadata(instanceMetadata)
+    def httpLoadBalancersInMetadata = metadataMap?.(GoogleServerGroup.View.GLOBAL_LOAD_BALANCER_NAMES)?.tokenize(",") ?: []
+    def networkLoadBalancersInMetadata = metadataMap?.(GoogleServerGroup.View.REGIONAL_LOAD_BALANCER_NAMES)?.tokenize(",") ?: []
+
+    def allFoundLoadBalancers = (httpLoadBalancersInMetadata + networkLoadBalancersInMetadata) as List<String>
+    def httpLoadBalancersToAddTo = queryAllLoadBalancers(googleLoadBalancerProvider, allFoundLoadBalancers, task, phase)
+        .findAll { GoogleLoadBalancerType.valueOf(it.loadBalancerType) == GoogleLoadBalancerType.HTTP }
+
+    if (httpLoadBalancersToAddTo) {
+      String policyJson = metadataMap?.(GoogleServerGroup.View.LOAD_BALANCING_POLICY)
+      if (!policyJson) {
+        updateStatusAndThrowNotFoundException("Load Balancing Policy not found for server group ${serverGroupName}", task, phase)
+      }
+      GoogleHttpLoadBalancingPolicy policy = objectMapper.readValue(policyJson, GoogleHttpLoadBalancingPolicy)
+
+      List<String> backendServiceNames = metadataMap?.(GoogleServerGroup.View.BACKEND_SERVICE_NAMES)?.split(",") ?: []
+      if (backendServiceNames) {
+        backendServiceNames.each { String backendServiceName ->
+          BackendService backendService = compute.backendServices().get(project, backendServiceName).execute()
+          Backend backendToAdd = backendFromLoadBalancingPolicy(policy)
+          if (serverGroup.regional) {
+            backendToAdd.setGroup(buildRegionalServerGroupUrl(project, serverGroup.region, serverGroupName))
+          } else {
+            backendToAdd.setGroup(buildZonalServerGroupUrl(project, serverGroup.zone, serverGroupName))
+          }
+          if (backendService.backends == null) {
+            backendService.backends = []
+          }
+          backendService.backends << backendToAdd
+          compute.backendServices().update(project, backendServiceName, backendService).execute()
+          task.updateStatus phase, "Enabled backend for server group ${serverGroupName} in Http(s) load balancer backend service ${backendServiceName}."
+        }
+      }
     }
+  }
+
+  /**
+   * Build a backend from a load balancing policy. Note that this does not set the group URL, which is mandatory.
+   *
+   * @param policy - The load balancing policy to build the Backend from.
+   * @return Backend created from the load balancing policy.
+     */
+  static Backend backendFromLoadBalancingPolicy(GoogleHttpLoadBalancingPolicy policy) {
+    def balancingMode = policy.balancingMode
+    return new Backend(
+      balancingMode: balancingMode,
+      maxRatePerInstance: balancingMode == GoogleHttpLoadBalancingPolicy.BalancingMode.RATE ?
+        policy.maxRatePerInstance : null,
+      maxUtilization: balancingMode == GoogleHttpLoadBalancingPolicy.BalancingMode.UTILIZATION ?
+        policy.maxUtilization : null,
+      capacityScaler: policy.capacityScaler != null ? policy.capacityScaler : 1.0,
+    )
+  }
+
+  // Note: listeningPort is not set in this method.
+  static GoogleHttpLoadBalancingPolicy loadBalancingPolicyFromBackend(Backend backend) {
+    def backendBalancingMode = GoogleHttpLoadBalancingPolicy.BalancingMode.valueOf(backend.balancingMode)
+    return new GoogleHttpLoadBalancingPolicy(
+      balancingMode: backendBalancingMode,
+      maxRatePerInstance: backendBalancingMode == GoogleHttpLoadBalancingPolicy.BalancingMode.RATE ?
+        backend.maxRatePerInstance : null,
+      maxUtilization: backendBalancingMode == GoogleHttpLoadBalancingPolicy.BalancingMode.UTILIZATION ?
+        backend.maxUtilization : null,
+      capacityScaler: backend.capacityScaler,
+    )
+  }
+
+  static void destroyHttpLoadBalancerBackends(Compute compute,
+                                              String project,
+                                              GoogleServerGroup.View serverGroup,
+                                              GoogleLoadBalancerProvider googleLoadBalancerProvider,
+                                              Task task,
+                                              String phase) {
+    def serverGroupName = serverGroup.name
+    def httpLoadBalancersInMetadata = serverGroup?.asg?.get(GoogleServerGroup.View.GLOBAL_LOAD_BALANCER_NAMES) ?: []
+    def foundHttpLoadBalancers = googleLoadBalancerProvider.getApplicationLoadBalancers("").findAll {
+      it.name in serverGroup.loadBalancers && it.loadBalancerType == GoogleLoadBalancerType.HTTP.toString()
+    }
+    def notDeleted = httpLoadBalancersInMetadata - (foundHttpLoadBalancers.collect { it.name })
+
+    log.debug("Attempting to delete backends for ${serverGroup.name} from the following Http load balancers: ${httpLoadBalancersInMetadata}")
+    if (notDeleted) {
+      log.warn("Could not locate the following Http load balancers: ${notDeleted}. Proceeding with other backend deletions without mutating them.")
+    }
+
+    if (foundHttpLoadBalancers) {
+      Metadata instanceMetadata = serverGroup?.launchConfig?.instanceTemplate?.properties?.metadata
+      Map metadataMap = buildMapFromMetadata(instanceMetadata)
+      List<String> backendServiceNames = metadataMap?.(GoogleServerGroup.View.BACKEND_SERVICE_NAMES)?.split(",")
+      if (backendServiceNames) {
+        backendServiceNames.each { String backendServiceName ->
+          BackendService backendService = compute.backendServices().get(project, backendServiceName).execute()
+          backendService?.backends?.removeAll { Backend backend ->
+            (getLocalName(backend.group) == serverGroupName) &&
+                (Utils.getRegionFromGroupUrl(backend.group) == serverGroup.region)
+          }
+          compute.backendServices().update(project, backendServiceName, backendService).execute()
+          task.updateStatus phase, "Deleted backend for server group ${serverGroupName} from Http(s) load balancer backend service ${backendServiceName}."
+        }
+      }
+    }
+  }
+
+  static Boolean isBackendServiceInUse(List<UrlMap> projectUrlMaps, String backendServiceName) {
+    def defaultServicesMatch = projectUrlMaps?.findAll { UrlMap urlMap ->
+      getLocalName(urlMap.getDefaultService()) == backendServiceName
+    }
+
+    def servicesInUse = []
+    projectUrlMaps?.each { UrlMap urlMap ->
+      urlMap?.getPathMatchers()?.each { PathMatcher pathMatcher ->
+        servicesInUse << getLocalName(pathMatcher.getDefaultService())
+        pathMatcher?.getPathRules()?.each { PathRule pathRule ->
+          servicesInUse << getLocalName(pathRule.getService())
+        }
+      }
+    }
+    return defaultServicesMatch || (backendServiceName in servicesInUse)
+  }
+
+  /**
+   * Resolve the L7 load balancer names that need added to the instance metadata.
+   *
+   * @param backendServiceNames - Backend service names explicitly included in the request.
+   * @param compute
+   * @param project
+   * @return List of L7 load balancer names to put into the instance metadata.
+   */
+  static List<String> resolveHttpLoadBalancerNamesMetadata(List<String> backendServiceNames, Compute compute, String project) {
+    def loadBalancerNames = []
+    def projectUrlMaps = compute.urlMaps().list(project).execute().getItems()
+    def servicesByUrlMap = projectUrlMaps.collectEntries { UrlMap urlMap ->
+      [(urlMap.name): Utils.getBackendServicesFromUrlMap(urlMap)]
+    }
+
+    def urlMapsInUse = []
+    backendServiceNames.each { String backendServiceName ->
+      servicesByUrlMap.each { urlMapName, services ->
+        if (backendServiceName in services) {
+          urlMapsInUse << urlMapName
+        }
+      }
+    }
+
+    def globalForwardingRules = compute.globalForwardingRules().list(project).execute().getItems()
+    globalForwardingRules.each { ForwardingRule fr ->
+      String proxyType = Utils.getTargetProxyType(fr.target)
+      def proxy = null
+      switch (proxyType) {
+        case "targetHttpProxies":
+          proxy = compute.targetHttpProxies().get(project, getLocalName(fr.target)).execute()
+          break
+        case "targetHttpsProxies":
+          proxy = compute.targetHttpsProxies().get(project, getLocalName(fr.target)).execute()
+          break
+        default:
+          break
+      }
+      if (proxy && getLocalName(proxy.urlMap) in urlMapsInUse) {
+        loadBalancerNames << fr.name
+      }
+    }
+    return loadBalancerNames
   }
 
   static Firewall buildFirewallRule(String projectName,

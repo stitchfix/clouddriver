@@ -1,4 +1,4 @@
-heat_template_version: 2015-04-30
+heat_template_version: 2016-04-08
 description: A load balanced server for Spinnaker
 parameters:
   flavor:
@@ -7,28 +7,22 @@ parameters:
   image:
     type: string
     description: Image used for servers
-  internal_port:
-    type: string
-    description: internal port on which each server will listen
   metadata:
     type: json
     description: server instance metadata
   network_id:
     type: string
-    description: Network used by each server
-  pool_id:
-    type: string
-    description: Pool to contact
+    description: Network used by each server. Retained for auditing purposes.
   security_groups:
     type: comma_delimited_list
     description: security groups associate to each server
+  subnet_id:
+    type: string
+    description: Subnet used to allocate a fixed IP for each server
+  user_data:
+    type: string
+    description: raw base64-encoded string that will execute upon server boot, if cloud-init is installed
 resources:
-  port:
-    type: OS::Neutron::Port
-    properties:
-      admin_state_up: true
-      network_id: { get_param: network_id }
-      security_groups: {get_param: security_groups}
   server:
     type: OS::Nova::Server
     properties:
@@ -36,13 +30,20 @@ resources:
       image: {get_param: image}
       metadata: {get_param: metadata}
       networks:
-        - port: {get_resource: port}
+        - subnet: {get_param: subnet_id}
+      security_groups: {get_param: security_groups}
+      user_data: {get_param: user_data}
+      user_data_format: RAW
   member:
-    type: OS::Neutron::PoolMember
+    type: OS::Heat::ResourceGroup
     properties:
-      pool_id: {get_param: pool_id}
-      address: {get_attr: [server, first_address]}
-      protocol_port: {get_param: internal_port}
+      count: 1
+      removal_policies: [{resource_list: [{resource: asg_member.yaml}]}]
+      resource_def:
+        # this is dynamically generated to associate a load balancer pool member from each listener to each server
+        type: asg_member.yaml
+        properties:
+          address: {get_attr: [server, first_address]}
 outputs:
   server_ip:
     description: IP Address of the load-balanced server

@@ -31,6 +31,7 @@ import com.netflix.spinnaker.clouddriver.kubernetes.deploy.description.servergro
 import io.fabric8.kubernetes.api.model.*
 import io.fabric8.kubernetes.api.model.extensions.Ingress
 import io.fabric8.kubernetes.api.model.extensions.Job
+import io.fabric8.kubernetes.api.model.extensions.ReplicaSet
 
 class KubernetesApiConverter {
   static KubernetesSecurityGroupDescription fromIngress(Ingress ingress) {
@@ -112,11 +113,11 @@ class KubernetesApiConverter {
     Volume volume = new Volume(name: volumeSource.name)
 
     switch (volumeSource.type) {
-      case KubernetesVolumeSourceType.EMPTYDIR:
+      case KubernetesVolumeSourceType.EmptyDir:
         def res = new EmptyDirVolumeSourceBuilder()
 
         switch (volumeSource.emptyDir.medium) {
-          case KubernetesStorageMediumType.MEMORY:
+          case KubernetesStorageMediumType.Memory:
             res = res.withMedium("Memory")
             break
 
@@ -127,19 +128,19 @@ class KubernetesApiConverter {
         volume.emptyDir = res.build()
         break
 
-      case KubernetesVolumeSourceType.HOSTPATH:
+      case KubernetesVolumeSourceType.HostPath:
         def res = new HostPathVolumeSourceBuilder().withPath(volumeSource.hostPath.path)
         volume.hostPath = res.build()
         break
 
-      case KubernetesVolumeSourceType.PERSISTENTVOLUMECLAIM:
+      case KubernetesVolumeSourceType.PersistentVolumeClaim:
         def res = new PersistentVolumeClaimVolumeSourceBuilder()
             .withClaimName(volumeSource.persistentVolumeClaim.claimName)
             .withReadOnly(volumeSource.persistentVolumeClaim.readOnly)
         volume.persistentVolumeClaim = res.build()
         break
 
-      case KubernetesVolumeSourceType.SECRET:
+      case KubernetesVolumeSourceType.Secret:
         def res = new SecretVolumeSourceBuilder()
             .withSecretName(volumeSource.secret.secretName)
         volume.secret = res.build()
@@ -156,6 +157,12 @@ class KubernetesApiConverter {
     KubernetesUtil.normalizeImageDescription(container.imageDescription)
     def imageId = KubernetesUtil.getImageId(container.imageDescription)
     def containerBuilder = new ContainerBuilder().withName(container.name).withImage(imageId)
+
+    if (container.imagePullPolicy) {
+      containerBuilder.withImagePullPolicy(container.imagePullPolicy.toString())
+    } else {
+      containerBuilder.withImagePullPolicy("IfNotPresent")
+    }
 
     if (container.ports) {
       container.ports.forEach {
@@ -240,6 +247,15 @@ class KubernetesApiConverter {
               containerBuilder = containerBuilder.withScheme(get.uriScheme)
             }
 
+            if (get.httpHeaders) {
+              def headers = get.httpHeaders.collect() {
+                def builder = new HTTPHeaderBuilder()
+                return builder.withName(it.name).withValue(it.value).build()
+              }
+
+              containerBuilder.withHttpHeaders(headers)
+            }
+
             containerBuilder = containerBuilder.endHttpGet()
             break
         }
@@ -300,12 +316,26 @@ class KubernetesApiConverter {
 
     if (container.envVars) {
       def envVars = container.envVars.collect { envVar ->
-        def res = new EnvVarBuilder()
-
-        return res.withName(envVar.name)
-            .withValue(envVar.value)
-            .build()
-      }
+        def res = (new EnvVarBuilder()).withName(envVar.name)
+        if (envVar.value) {
+          res = res.withValue(envVar.value)
+        } else if (envVar.envSource) {
+          res = res.withNewValueFrom()
+          if (envVar.envSource.configMapSource) {
+            def configMap = envVar.envSource.configMapSource
+            res = res.withNewConfigMapKeyRef(configMap.key, configMap.configMapName)
+          } else if (envVar.envSource.secretSource) {
+            def secret = envVar.envSource.secretSource
+            res = res.withNewSecretKeyRef(secret.key, secret.secretName)
+          } else {
+            return null
+          }
+          res = res.endValueFrom()
+        } else {
+          return null
+        }
+        return res.build()
+      } - null
 
       containerBuilder = containerBuilder.withEnv(envVars)
     }
@@ -329,6 +359,10 @@ class KubernetesApiConverter {
     def containerDescription = new KubernetesContainerDescription()
     containerDescription.name = container.name
     containerDescription.imageDescription = KubernetesUtil.buildImageDescription(container.image)
+
+    if (container.imagePullPolicy) {
+      containerDescription.imagePullPolicy = KubernetesPullPolicy.valueOf(container.imagePullPolicy)
+    }
 
     container.resources?.with {
       containerDescription.limits = limits?.cpu?.amount || limits?.memory?.amount ?
@@ -363,8 +397,26 @@ class KubernetesApiConverter {
     containerDescription.readinessProbe = fromProbe(container?.readinessProbe)
 
     containerDescription.envVars = container?.env?.collect { envVar ->
-      new KubernetesEnvVar(name: envVar.name, value: envVar.value)
-    }
+      def result = new KubernetesEnvVar(name: envVar.name)
+      if (envVar.value) {
+        result.value = envVar.value
+      } else if (envVar.valueFrom) {
+        def source = new KubernetesEnvVarSource()
+        if (envVar.valueFrom.configMapKeyRef) {
+          def configMap = envVar.valueFrom.configMapKeyRef
+          source.configMapSource = new KubernetesConfigMapSource(key: configMap.key, configMapName: configMap.name)
+        } else if (envVar.valueFrom.secretKeyRef) {
+          def secret = envVar.valueFrom.secretKeyRef
+          source.secretSource = new KubernetesSecretSource(key: secret.key, secretName: secret.name)
+        } else {
+          return null
+        }
+        result.envSource = source
+      } else {
+        return null
+      }
+      return result
+    } - null
 
     containerDescription.volumeMounts = container?.volumeMounts?.collect { volumeMount ->
       new KubernetesVolumeMount(name: volumeMount.name, readOnly: volumeMount.readOnly, mountPath: volumeMount.mountPath)
@@ -380,51 +432,51 @@ class KubernetesApiConverter {
     def res = new KubernetesVolumeSource(name: volume.name)
 
     if (volume.emptyDir) {
-      res.type = KubernetesVolumeSourceType.EMPTYDIR
+      res.type = KubernetesVolumeSourceType.EmptyDir
       def medium = volume.emptyDir.medium
       def mediumType
 
       if (medium == "Memory") {
-        mediumType = KubernetesStorageMediumType.MEMORY
+        mediumType = KubernetesStorageMediumType.Memory
       } else {
-        mediumType = KubernetesStorageMediumType.DEFAULT
+        mediumType = KubernetesStorageMediumType.Default
       }
 
       res.emptyDir = new KubernetesEmptyDir(medium: mediumType)
     } else if (volume.hostPath) {
-      res.type = KubernetesVolumeSourceType.HOSTPATH
+      res.type = KubernetesVolumeSourceType.HostPath
       res.hostPath = new KubernetesHostPath(path: volume.hostPath.path)
     } else if (volume.persistentVolumeClaim) {
-      res.type = KubernetesVolumeSourceType.PERSISTENTVOLUMECLAIM
+      res.type = KubernetesVolumeSourceType.PersistentVolumeClaim
       res.persistentVolumeClaim = new KubernetesPersistentVolumeClaim(claimName: volume.persistentVolumeClaim.claimName,
         readOnly: volume.persistentVolumeClaim.readOnly)
     } else if (volume.secret) {
-      res.type = KubernetesVolumeSourceType.SECRET
+      res.type = KubernetesVolumeSourceType.Secret
       res.secret = new KubernetesSecretVolumeSource(secretName: volume.secret.secretName)
     } else {
-      res.type = KubernetesVolumeSourceType.UNSUPPORTED
+      res.type = KubernetesVolumeSourceType.Unsupported
     }
 
     return res
   }
 
-  static RunKubernetesJobDescription fromJob(Job job) {
-    def deployDescription = new RunKubernetesJobDescription()
-    def parsedName = Names.parseName(job?.metadata?.name)
+  static DeployKubernetesAtomicOperationDescription fromReplicaSet(ReplicaSet replicaSet) {
+    def deployDescription = new DeployKubernetesAtomicOperationDescription()
+    def parsedName = Names.parseName(replicaSet?.metadata?.name)
 
     deployDescription.application = parsedName?.app
     deployDescription.stack = parsedName?.stack
     deployDescription.freeFormDetails = parsedName?.detail
-    deployDescription.loadBalancers = KubernetesUtil?.getJobLoadBalancers(job)
-    deployDescription.namespace = job?.metadata?.namespace
-    deployDescription.completions = job?.spec?.completions
-    deployDescription.parallelism = job?.spec?.parallelism
+    deployDescription.loadBalancers = KubernetesUtil?.getLoadBalancers(replicaSet)
+    deployDescription.namespace = replicaSet?.metadata?.namespace
+    deployDescription.targetSize = replicaSet?.spec?.replicas
+    deployDescription.securityGroups = []
 
-    deployDescription.volumeSources = job?.spec?.template?.spec?.volumes?.collect {
+    deployDescription.volumeSources = replicaSet?.spec?.template?.spec?.volumes?.collect {
       fromVolume(it)
     } ?: []
 
-    deployDescription.containers = job?.spec?.template?.spec?.containers?.collect {
+    deployDescription.containers = replicaSet?.spec?.template?.spec?.containers?.collect {
       fromContainer(it)
     } ?: []
 
@@ -438,7 +490,7 @@ class KubernetesApiConverter {
     deployDescription.application = parsedName?.app
     deployDescription.stack = parsedName?.stack
     deployDescription.freeFormDetails = parsedName?.detail
-    deployDescription.loadBalancers = KubernetesUtil?.getDescriptionLoadBalancers(replicationController)
+    deployDescription.loadBalancers = KubernetesUtil?.getLoadBalancers(replicationController)
     deployDescription.namespace = replicationController?.metadata?.namespace
     deployDescription.targetSize = replicationController?.spec?.replicas
     deployDescription.securityGroups = []
@@ -515,6 +567,9 @@ class KubernetesApiConverter {
     kubernetesHttpGetAction.path = httpGet.path
     kubernetesHttpGetAction.port = httpGet.port?.intVal
     kubernetesHttpGetAction.uriScheme = httpGet.scheme
+    kubernetesHttpGetAction.httpHeaders = httpGet.httpHeaders?.collect() {
+      new KeyValuePair(name: it.name, value: it.value)
+    }
     return kubernetesHttpGetAction
   }
 }
